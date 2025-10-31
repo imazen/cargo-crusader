@@ -9,6 +9,7 @@
 // except according to those terms.
 
 mod cli;
+mod compile;
 
 use semver::Version;
 use std::env;
@@ -200,37 +201,69 @@ struct TestResult {
 
 #[derive(Debug)]
 enum TestResultData {
-    Passed(CompileResult, CompileResult),
-    Regressed(CompileResult, CompileResult),
-    Broken(CompileResult),
+    Passed(compile::FourStepResult),
+    Regressed(compile::FourStepResult),
+    Broken(compile::FourStepResult),
     Error(Error),
 }
 
 impl TestResult {
+    fn from_four_step(rev_dep: RevDep, result: compile::FourStepResult) -> TestResult {
+        let data = if result.is_broken() {
+            TestResultData::Broken(result)
+        } else if result.is_regressed() {
+            TestResultData::Regressed(result)
+        } else {
+            TestResultData::Passed(result)
+        };
+
+        TestResult { rev_dep, data }
+    }
+
+    // Legacy constructors for backwards compatibility during migration
     fn passed(rev_dep: RevDep, r1: CompileResult, r2: CompileResult) -> TestResult {
+        // Convert old-style to new FourStepResult
+        let four_step = compile::FourStepResult {
+            baseline_check: r1.clone(),
+            baseline_test: Some(r1),
+            override_check: Some(r2.clone()),
+            override_test: Some(r2),
+        };
         TestResult {
-            rev_dep: rev_dep,
-            data: TestResultData::Passed(r1, r2)
+            rev_dep,
+            data: TestResultData::Passed(four_step)
         }
     }
 
     fn regressed(rev_dep: RevDep, r1: CompileResult, r2: CompileResult) -> TestResult {
+        let four_step = compile::FourStepResult {
+            baseline_check: r1.clone(),
+            baseline_test: Some(r1),
+            override_check: Some(r2.clone()),
+            override_test: Some(r2),
+        };
         TestResult {
-            rev_dep: rev_dep,
-            data: TestResultData::Regressed(r1, r2)
+            rev_dep,
+            data: TestResultData::Regressed(four_step)
         }
     }
 
     fn broken(rev_dep: RevDep, r: CompileResult) -> TestResult {
+        let four_step = compile::FourStepResult {
+            baseline_check: r,
+            baseline_test: None,
+            override_check: None,
+            override_test: None,
+        };
         TestResult {
-            rev_dep: rev_dep,
-            data: TestResultData::Broken(r)
+            rev_dep,
+            data: TestResultData::Broken(four_step)
         }
     }
 
     fn error(rev_dep: RevDep, e: Error) -> TestResult {
         TestResult {
-            rev_dep: rev_dep,
+            rev_dep,
             data: TestResultData::Error(e)
         }
     }
@@ -368,18 +401,8 @@ fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
 }
 
 
-#[derive(Debug, Clone)]
-struct CompileResult {
-    stdout: String,
-    stderr: String,
-    success: bool
-}
-
-impl CompileResult {
-    fn failed(&self) -> bool {
-        !self.success
-    }
-}
+// CompileResult is now in compile module
+type CompileResult = compile::CompileResult;
 
 fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride) -> Result<CompileResult, Error> {
     let ref crate_handle = get_crate_handle(rev_dep)?;
@@ -400,20 +423,24 @@ fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride) -> Result<Co
     // NB: The way cargo searches for .cargo/config, which we use to
     // override dependencies, depends on the CWD, and is not affacted
     // by the --manifest-path flag, so this is changing directories.
+    let start = std::time::Instant::now();
     let mut cmd = Command::new("cargo");
     let cmd = cmd.arg("build")
         .current_dir(source_dir);
     debug!("running cargo: {:?}", cmd);
     let r = cmd.output()?;
 
+    let duration = start.elapsed();
     let success = r.status.success();
 
     debug!("result: {:?}", success);
 
     Ok(CompileResult {
+        step: compile::CompileStep::Check, // Legacy: using Check for old build command
+        success,
         stdout: (String::from_utf8(r.stdout)?),
         stderr: (String::from_utf8(r.stderr)?),
-        success: success
+        duration,
     })
 }
 
@@ -613,14 +640,25 @@ fn export_report(mut results: Vec<TestResult>) -> Result<(Summary, PathBuf), Err
         (writeln!(file, "<span>{} {}</span>", result.rev_dep.name, result.rev_dep.vers))?;
         (writeln!(file, "<span class='{}'>{}</span>", result.html_class(), result.quick_str()))?;
         (writeln!(file, "</h2>")?);
-        match result.data {
-            TestResultData::Passed(r1, r2) |
-            TestResultData::Regressed(r1, r2) => {
-                (export_compile_result(file, "before", r1)?);
-                (export_compile_result(file, "after", r2)?);
+        match &result.data {
+            TestResultData::Passed(four_step) |
+            TestResultData::Regressed(four_step) => {
+                (export_compile_result(file, "baseline check", &four_step.baseline_check)?);
+                if let Some(ref test) = four_step.baseline_test {
+                    (export_compile_result(file, "baseline test", test)?);
+                }
+                if let Some(ref check) = four_step.override_check {
+                    (export_compile_result(file, "override check", check)?);
+                }
+                if let Some(ref test) = four_step.override_test {
+                    (export_compile_result(file, "override test", test)?);
+                }
             }
-            TestResultData::Broken(r) => {
-                (export_compile_result(file, "before", r)?);
+            TestResultData::Broken(four_step) => {
+                (export_compile_result(file, "baseline check", &four_step.baseline_check)?);
+                if let Some(ref test) = four_step.baseline_test {
+                    (export_compile_result(file, "baseline test", test)?);
+                }
             }
             TestResultData::Error(e) => {
                 (export_error(file, e)?);
@@ -634,17 +672,19 @@ fn export_report(mut results: Vec<TestResult>) -> Result<(Summary, PathBuf), Err
     Ok((s, path))
 }
 
-fn export_compile_result(file: &mut File, label: &str, r: CompileResult) -> Result<(), Error> {
+fn export_compile_result(file: &mut File, label: &str, r: &CompileResult) -> Result<(), Error> {
     let stdout = sanitize(&r.stdout);
     let stderr = sanitize(&r.stderr);
-    (writeln!(file, "<h3>{}</h3>", label)?);
+    let success_marker = if r.success { "✓" } else { "✗" };
+    let duration_str = format!("{:.2}s", r.duration.as_secs_f64());
+    (writeln!(file, "<h3>{} {} ({})</h3>", label, success_marker, duration_str)?);
     (writeln!(file, "<div class='stdout'>\n{}\n</div>", stdout)?);
     (writeln!(file, "<div class='stderr'>\n{}\n</div>", stderr)?);
 
     Ok(())
 }
 
-fn export_error(file: &mut File, e: Error) -> Result<(), Error> {
+fn export_error(file: &mut File, e: &Error) -> Result<(), Error> {
     let err = sanitize(&format!("{}", e));
     (writeln!(file, "<h3>{}</h3>", "errors")?);
     (writeln!(file, "<div class='test-exception-output'>\n{}\n</div>", err)?);
