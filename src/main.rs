@@ -8,24 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern crate curl;
-extern crate env_logger;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate log;
-extern crate rustc_serialize;
-extern crate semver;
-extern crate term;
-extern crate toml;
-extern crate threadpool;
-extern crate num_cpus;
-extern crate tempdir;
-
-use curl::easy::Easy;
-use rustc_serialize::json;
+use serde::Deserialize;
 use semver::Version;
-use std::convert::From;
 use std::env;
 use std::error::Error as StdError;
 use std::fmt;
@@ -33,23 +17,25 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{PathBuf, Path};
 use std::process::Command;
-use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Sender, Receiver, RecvError};
 use threadpool::ThreadPool;
-use tempdir::TempDir;
+use tempfile::TempDir;
+
+use lazy_static::lazy_static;
+use log::debug;
 
 fn main() {
-    env_logger::init().unwrap();
+    env_logger::init();
     report_results(run());
 }
 
 fn run() -> Result<Vec<TestResult>, Error> {
-    let config = try!(get_config());
+    let config = get_config()?;
 
     // Find all the crates on crates.io the depend on ours
-    let rev_deps = try!(get_rev_deps(&config.crate_name));
+    let rev_deps = get_rev_deps(&config.crate_name)?;
 
     // Run all the tests in a thread pool and create a list of result
     // receivers.
@@ -74,7 +60,6 @@ fn run() -> Result<Vec<TestResult>, Error> {
 
 #[derive(Clone)]
 struct Config {
-    manifest_path: PathBuf,
     crate_name: String,
     base_override: CrateOverride,
     next_override: CrateOverride
@@ -92,9 +77,8 @@ fn get_config() -> Result<Config, Error> {
     let manifest = PathBuf::from(manifest);
     debug!("Using manifest {:?}", manifest);
 
-    let source_name = try!(get_crate_name(&manifest));
+    let source_name = get_crate_name(&manifest)?;
     Ok(Config {
-        manifest_path: manifest.clone(),
         crate_name: source_name,
         base_override: CrateOverride::Default,
         next_override: CrateOverride::Source(manifest)
@@ -102,36 +86,30 @@ fn get_config() -> Result<Config, Error> {
 }
 
 fn get_crate_name(manifest_path: &Path) -> Result<String, Error> {
-    let ref toml = try!(load_string(manifest_path));
-    let mut parser = toml::Parser::new(toml);
-    let toml = parser.parse();
-    let map = if toml.is_none() {
-        return Err(Error::TomlError(parser.errors))
-    } else {
-        toml.unwrap()
-    };
+    let toml_str = load_string(manifest_path)?;
+    let value: toml::Value = toml::from_str(&toml_str)?;
 
-    match map.get("package") {
-        Some(&toml::Value::Table(ref t)) => {
+    match value.get("package") {
+        Some(toml::Value::Table(t)) => {
             match t.get("name") {
-                Some(&toml::Value::String(ref s)) => {
+                Some(toml::Value::String(s)) => {
                     Ok(s.clone())
                 }
                 _ => {
-                    Err(Error::ManifestName(PathBuf::from(manifest_path)))
+                    Err(Error::ManifestName)
                 }
             }
         }
         _ => {
-            Err(Error::ManifestName(PathBuf::from(manifest_path)))
+            Err(Error::ManifestName)
         }
     }
 }
 
 fn load_string(path: &Path) -> Result<String, Error> {
-    let mut file = try!(File::open(path));
+    let mut file = File::open(path)?;
     let mut s = String::new();
-    try!(file.read_to_string(&mut s));
+    (file.read_to_string(&mut s)?);
     Ok(s)
 }
 
@@ -169,8 +147,8 @@ fn get_rev_deps(crate_name: &str) -> Result<Vec<RevDepName>, Error> {
                                            &[("per_page", "100"),
                                              ("page", &page.to_string())]);
         println!("{}", url);
-        let ref body = try!(http_get_to_string(url));
-        let rev_deps = try!(parse_rev_deps(body));
+        let ref body = http_get_to_string(url)?;
+        let rev_deps = parse_rev_deps(body)?;
 
         let len = rev_deps.len();
 
@@ -189,39 +167,33 @@ fn get_rev_deps(crate_name: &str) -> Result<Vec<RevDepName>, Error> {
 }
 
 fn http_get_to_string(url: &str) -> Result<String, Error> {
-    Ok(try!(String::from_utf8(try!(http_get_bytes(url)))))
+    let resp = ureq::get(url).call()?;
+    let body = resp.into_string()?;
+    Ok(body)
 }
 
 fn http_get_bytes(url: &str) -> Result<Vec<u8>, Error> {
-    let mut data: Vec<u8> = Vec::new();
-    let mut handle = Easy::new();
-    handle.url(url)?;
-
-    {
-        let mut transfer = handle.transfer();
-        transfer.write_function(|d: &[u8]| {
-            data.extend(d);
-            Ok(d.len())
-        })?;
-
-        transfer.perform()?;
-    }
-
+    let resp = ureq::get(url).call()?;
+    let len = resp.header("Content-Length")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut data: Vec<u8> = Vec::with_capacity(len);
+    resp.into_reader().read_to_end(&mut data)?;
     Ok(data)
 }
 
 fn parse_rev_deps(s: &str) -> Result<Vec<RevDepName>, Error> {
-    #[derive(RustcEncodable, RustcDecodable)]
+    #[derive(Deserialize)]
     struct Response {
         dependencies: Vec<Dep>,
     }
 
-    #[derive(RustcEncodable, RustcDecodable)]
+    #[derive(Deserialize)]
     struct Dep {
         crate_id: String
     }
 
-    let decoded: Response = try!(json::decode(&s));
+    let decoded: Response = serde_json::from_str(s)?;
 
     fn depconv(d: Dep) -> RevDepName { d.crate_id }
 
@@ -397,9 +369,9 @@ fn run_test_local(config: &Config, rev_dep: RevDepName) -> TestResult {
 fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
     debug!("resolving current version for {}", name);
     let ref url = crate_url(&name, None);
-    let ref body = try!(http_get_to_string(url));
+    let ref body = http_get_to_string(url)?;
     // Download the crate info from crates.io
-    let krate = try!(parse_crate(body));
+    let krate = parse_crate(body)?;
     // Pull out the version numbers and sort them
     let versions = krate.versions.iter()
         .filter_map(|r| Version::parse(&*r.num).ok());
@@ -416,18 +388,18 @@ fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
 
 // The server returns much more info than this.
 // This just defines pieces we need.
-#[derive(RustcEncodable, RustcDecodable, Debug)]
+#[derive(Deserialize, Debug)]
 struct RegistryCrate {
     versions: Vec<RegistryVersion>
 }
 
-#[derive(RustcEncodable, RustcDecodable, Debug)]
+#[derive(Deserialize, Debug)]
 struct RegistryVersion {
     num: String
 }
 
 fn parse_crate(s: &str) -> Result<RegistryCrate, Error> {
-    Ok(try!(json::decode(&s)))
+    Ok(serde_json::from_str(s)?)
 }
 
 #[derive(Debug, Clone)]
@@ -444,18 +416,18 @@ impl CompileResult {
 }
 
 fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride) -> Result<CompileResult, Error> {
-    let ref crate_handle = try!(get_crate_handle(rev_dep));
-    let temp_dir = try!(TempDir::new("crusader"));
+    let ref crate_handle = get_crate_handle(rev_dep)?;
+    let temp_dir = TempDir::new()?;
     let ref source_dir = temp_dir.path().join("source");
-    try!(fs::create_dir(source_dir));
-    try!(crate_handle.unpack_source_to(source_dir));
+    (fs::create_dir(source_dir)?);
+    (crate_handle.unpack_source_to(source_dir)?);
 
     match *krate {
         CrateOverride::Default => (),
         CrateOverride::Source(ref path) => {
             // Emit a .cargo/config file to override the project's
             // dependency on *our* project with the WIP.
-            try!(emit_cargo_override_path(source_dir, path));
+            (emit_cargo_override_path(source_dir, path)?);
         }
     }
 
@@ -466,15 +438,15 @@ fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride) -> Result<Co
     let cmd = cmd.arg("build")
         .current_dir(source_dir);
     debug!("running cargo: {:?}", cmd);
-    let r = try!(cmd.output());
+    let r = cmd.output()?;
 
     let success = r.status.success();
 
     debug!("result: {:?}", success);
 
     Ok(CompileResult {
-        stdout: try!(String::from_utf8(r.stdout)),
-        stderr: try!(String::from_utf8(r.stderr)),
+        stdout: (String::from_utf8(r.stdout)?),
+        stderr: (String::from_utf8(r.stderr)?),
         success: success
     })
 }
@@ -484,18 +456,18 @@ struct CrateHandle(PathBuf);
 fn get_crate_handle(rev_dep: &RevDep) -> Result<CrateHandle, Error> {
     let cache_path = Path::new("./.crusader/crate-cache");
     let ref crate_dir = cache_path.join(&rev_dep.name);
-    try!(fs::create_dir_all(crate_dir));
+    (fs::create_dir_all(crate_dir)?);
     let crate_file = crate_dir.join(format!("{}-{}.crate", rev_dep.name, rev_dep.vers));
     // FIXME: Path::exists() is unstable so just opening the file
     let crate_file_exists = File::open(&crate_file).is_ok();
     if !crate_file_exists {
         let url = crate_url(&rev_dep.name,
                             Some(&format!("{}/download", rev_dep.vers)));
-        let body = try!(http_get_bytes(&url));
+        let body = http_get_bytes(&url)?;
         // FIXME: Should move this into place atomically
-        let mut file = try!(File::create(&crate_file));
-        try!(file.write_all(&body));
-        try!(file.flush());
+        let mut file = File::create(&crate_file)?;
+        (file.write_all(&body)?);
+        (file.flush()?);
     }
 
     return Ok(CrateHandle(crate_file));
@@ -511,7 +483,7 @@ impl CrateHandle {
             .arg("--strip-components=1")
             .arg("-C")
             .arg(path.to_str().unwrap().to_owned());
-        let r = try!(cmd.output());
+        let r = cmd.output()?;
         if r.status.success() {
             Ok(())
         } else {
@@ -534,15 +506,15 @@ fn emit_cargo_override_path(source_dir: &Path, override_path: &Path) -> Result<(
     let override_path = if override_path.is_absolute() {
         override_path.to_path_buf()
     } else {
-        try!(env::current_dir()).join(override_path)
+        (env::current_dir()?).join(override_path)
     };
     let ref cargo_dir = source_dir.join(".cargo");
-    try!(fs::create_dir_all(cargo_dir));
+    (fs::create_dir_all(cargo_dir)?);
     let ref config_path = cargo_dir.join("config");
-    let mut file = try!(File::create(config_path));
+    let mut file = File::create(config_path)?;
     let s = format!(r#"paths = ["{}"]"#, override_path.to_str().unwrap());
-    try!(file.write_all(s.as_bytes()));
-    try!(file.flush());
+    file.write_all(s.as_bytes())?;
+    file.flush()?;
 
     Ok(())
 }
@@ -570,7 +542,7 @@ fn print_color(s: &str, fg: term::color::Color) {
             if t.fg(fg).is_err() { return false }
             let _ = t.attr(term::Attr::Bold);
             if write!(t, "{}", s).is_err() { return false }
-            assert!(t.reset().unwrap());
+            let _ = t.reset();
         }
 
         true
@@ -617,9 +589,7 @@ fn report_results(res: Result<Vec<TestResult>, Error>) {
 fn report_error(e: Error) {
     println!("");
     print_color("error", term::color::BRIGHT_RED);
-    println!(": {}", e.description());
-    println!("");
-    println!("{}", e);
+    println!(": {}", e);
     println!("");
 
     std::process::exit(-1);
@@ -633,11 +603,11 @@ fn export_report(mut results: Vec<TestResult>) -> Result<(Summary, PathBuf), Err
         a.rev_dep.name.cmp(&b.rev_dep.name)
     });
 
-    let ref mut file = try!(File::create(&path));
-    try!(writeln!(file, "<!DOCTYPE html>"));
+    let ref mut file = File::create(&path)?;
+    (writeln!(file, "<!DOCTYPE html>")?);
 
-    try!(writeln!(file, "<head>"));
-    try!(writeln!(file, "{}", r"
+    (writeln!(file, "<head>")?);
+    writeln!(file, "{}", r"
 
 <style>
 .passed { color: green; }
@@ -647,53 +617,53 @@ fn export_report(mut results: Vec<TestResult>) -> Result<(Summary, PathBuf), Err
 .stdout, .stderr, .test-exception-output { white-space: pre; }
 </style>
 
-"));
-    try!(writeln!(file, "</head>"));
+")?;
+    (writeln!(file, "</head>")?);
 
-    try!(writeln!(file, "<body>"));
+    (writeln!(file, "<body>")?);
 
     // Print the summary table
-    try!(writeln!(file, "<h1>Summary</h1>"));
-    try!(writeln!(file, "<table>"));
-    try!(writeln!(file, "<tr><th>Crate</th><th>Version</th><th>Result</th></tr>"));
+    (writeln!(file, "<h1>Summary</h1>")?);
+    (writeln!(file, "<table>")?);
+    (writeln!(file, "<tr><th>Crate</th><th>Version</th><th>Result</th></tr>")?);
     for result in &results {
-        try!(writeln!(file, "<tr>"));
-        try!(writeln!(file, "<td>"));
-        try!(writeln!(file, "<a href='#{}'>", result.html_anchor()));
-        try!(writeln!(file, "{}", result.rev_dep.name));
-        try!(writeln!(file, "</a>"));
-        try!(writeln!(file, "</td>"));
-        try!(writeln!(file, "<td>{}</td>", result.rev_dep.vers));
-        try!(writeln!(file, "<td class='{}'>{}</td>", result.html_class(), result.quick_str()));
-        try!(writeln!(file, "</tr>"));
+        (writeln!(file, "<tr>")?);
+        (writeln!(file, "<td>")?);
+        (writeln!(file, "<a href='#{}'>", result.html_anchor()))?;
+        (writeln!(file, "{}", result.rev_dep.name))?;
+        (writeln!(file, "</a>"))?;
+        (writeln!(file, "</td>"))?;
+        (writeln!(file, "<td>{}</td>", result.rev_dep.vers))?;
+        (writeln!(file, "<td class='{}'>{}</td>", result.html_class(), result.quick_str()))?;
+        (writeln!(file, "</tr>")?);
     }
-    try!(writeln!(file, "</table>"));
+    (writeln!(file, "</table>")?);
 
-    try!(writeln!(file, "<h1>Details</h1>"));
+    (writeln!(file, "<h1>Details</h1>")?);
     for result in results {
-        try!(writeln!(file, "<div class='complete-result'>"));
-        try!(writeln!(file, "<a name='{}'></a>", result.html_anchor()));
-        try!(writeln!(file, "<h2>"));
-        try!(writeln!(file, "<span>{} {}</span>", result.rev_dep.name, result.rev_dep.vers));
-        try!(writeln!(file, "<span class='{}'>{}</span>", result.html_class(), result.quick_str()));
-        try!(writeln!(file, "</h2>"));
+        (writeln!(file, "<div class='complete-result'>")?);
+        (writeln!(file, "<a name='{}'></a>", result.html_anchor()))?;
+        (writeln!(file, "<h2>"))?;
+        (writeln!(file, "<span>{} {}</span>", result.rev_dep.name, result.rev_dep.vers))?;
+        (writeln!(file, "<span class='{}'>{}</span>", result.html_class(), result.quick_str()))?;
+        (writeln!(file, "</h2>")?);
         match result.data {
             TestResultData::Passed(r1, r2) |
             TestResultData::Regressed(r1, r2) => {
-                try!(export_compile_result(file, "before", r1));
-                try!(export_compile_result(file, "after", r2));
+                (export_compile_result(file, "before", r1)?);
+                (export_compile_result(file, "after", r2)?);
             }
             TestResultData::Broken(r) => {
-                try!(export_compile_result(file, "before", r));
+                (export_compile_result(file, "before", r)?);
             }
             TestResultData::Error(e) => {
-                try!(export_error(file, e));
+                (export_error(file, e)?);
             }
         }
-        try!(writeln!(file, "</div>"));
+        (writeln!(file, "</div>")?);
     }
     
-    try!(writeln!(file, "</body>"));
+    (writeln!(file, "</body>")?);
 
     Ok((s, path))
 }
@@ -701,17 +671,17 @@ fn export_report(mut results: Vec<TestResult>) -> Result<(Summary, PathBuf), Err
 fn export_compile_result(file: &mut File, label: &str, r: CompileResult) -> Result<(), Error> {
     let stdout = sanitize(&r.stdout);
     let stderr = sanitize(&r.stderr);
-    try!(writeln!(file, "<h3>{}</h3>", label));
-    try!(writeln!(file, "<div class='stdout'>\n{}\n</div>", stdout));
-    try!(writeln!(file, "<div class='stderr'>\n{}\n</div>", stderr));
+    (writeln!(file, "<h3>{}</h3>", label)?);
+    (writeln!(file, "<div class='stdout'>\n{}\n</div>", stdout)?);
+    (writeln!(file, "<div class='stderr'>\n{}\n</div>", stderr)?);
 
     Ok(())
 }
 
 fn export_error(file: &mut File, e: Error) -> Result<(), Error> {
     let err = sanitize(&format!("{}", e));
-    try!(writeln!(file, "<h3>{}</h3>", "errors"));
-    try!(writeln!(file, "<div class='test-exception-output'>\n{}\n</div>", err));
+    (writeln!(file, "<h3>{}</h3>", "errors")?);
+    (writeln!(file, "<div class='test-exception-output'>\n{}\n</div>", err)?);
 
     Ok(())
 }
@@ -798,13 +768,12 @@ fn summarize_results(results: &[TestResult]) -> Summary {
 
 #[derive(Debug)]
 enum Error {
-    ManifestName(PathBuf),
-    SemverError(semver::ParseError),
-    TomlError(Vec<toml::ParserError>),
+    ManifestName,
+    SemverError(semver::Error),
+    TomlError(toml::de::Error),
     IoError(io::Error),
-    CurlError(curl::Error),
-    Utf8Error(Utf8Error),
-    JsonDecode(json::DecoderError),
+    UreqError(Box<ureq::Error>),
+    JsonError(serde_json::Error),
     RecvError(RecvError),
     NoCrateVersions,
     FromUtf8Error(FromUtf8Error),
@@ -821,46 +790,47 @@ macro_rules! convert_error {
     )
 }
 
-convert_error!(semver::ParseError, SemverError);
+convert_error!(semver::Error, SemverError);
 convert_error!(io::Error, IoError);
-convert_error!(curl::Error, CurlError);
-convert_error!(Utf8Error, Utf8Error);
-convert_error!(json::DecoderError, JsonDecode);
+convert_error!(serde_json::Error, JsonError);
+convert_error!(toml::de::Error, TomlError);
 convert_error!(RecvError, RecvError);
 convert_error!(FromUtf8Error, FromUtf8Error);
 
+impl From<ureq::Error> for Error {
+    fn from(e: ureq::Error) -> Error {
+        Error::UreqError(Box::new(e))
+    }
+}
+
 impl fmt::Display for Error {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match *self {
-            Error::ManifestName(_) => fmt.write_str(self.description()),
-            Error::SemverError(ref e) => e.fmt(fmt),
-            Error::TomlError(_) => fmt.write_str(self.description()),
-            Error::IoError(ref e) => e.fmt(fmt),
-            Error::CurlError(ref c) => c.fmt(fmt),
-            Error::Utf8Error(ref e) => e.fmt(fmt),
-            Error::JsonDecode(ref e) => e.fmt(fmt),
-            Error::RecvError(ref e) => e.fmt(fmt),
-            Error::NoCrateVersions => fmt.write_str(self.description()),
-            Error::FromUtf8Error(ref e) => e.fmt(fmt),
-            Error::ProcessError(ref s) => s.fmt(fmt)
+            Error::ManifestName => write!(f, "error extracting crate name from manifest"),
+            Error::SemverError(ref e) => write!(f, "semver error: {}", e),
+            Error::TomlError(ref e) => write!(f, "TOML parse error: {}", e),
+            Error::IoError(ref e) => write!(f, "IO error: {}", e),
+            Error::UreqError(ref e) => write!(f, "HTTP error: {}", e),
+            Error::JsonError(ref e) => write!(f, "JSON error: {}", e),
+            Error::RecvError(ref e) => write!(f, "receive error: {}", e),
+            Error::NoCrateVersions => write!(f, "crate has no published versions"),
+            Error::FromUtf8Error(ref e) => write!(f, "UTF-8 conversion error: {}", e),
+            Error::ProcessError(ref s) => write!(f, "process error: {}", s)
         }
     }
 }
 
 impl StdError for Error {
-    fn description(&self) -> &str {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match *self {
-            Error::ManifestName(_) => "error extracting crate name from manifest",
-            Error::SemverError(ref e) => e.description(),
-            Error::TomlError(_) => "error parsing TOML",
-            Error::IoError(ref e) => e.description(),
-            Error::CurlError(_) => "curl error",
-            Error::Utf8Error(ref e) => e.description(),
-            Error::JsonDecode(ref e) => e.description(),
-            Error::RecvError(ref e) => e.description(),
-            Error::NoCrateVersions => "crate has no published versions",
-            Error::FromUtf8Error(ref e) => e.description(),
-            Error::ProcessError(_) => "unexpected subprocess failure"
+            Error::SemverError(ref e) => Some(e),
+            Error::TomlError(ref e) => Some(e),
+            Error::IoError(ref e) => Some(e),
+            Error::UreqError(ref e) => Some(e.as_ref()),
+            Error::JsonError(ref e) => Some(e),
+            Error::RecvError(ref e) => Some(e),
+            Error::FromUtf8Error(ref e) => Some(e),
+            _ => None
         }
     }
 }
