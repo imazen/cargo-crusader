@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+mod api;
 mod cli;
 mod compile;
 
@@ -41,19 +42,55 @@ lazy_static! {
 
 fn main() {
     env_logger::init();
-    report_results(run());
+
+    // Parse CLI arguments
+    let args = cli::CliArgs::parse_args();
+
+    // Validate arguments
+    if let Err(e) = args.validate() {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+
+    report_results(run(args));
 }
 
-fn run() -> Result<Vec<TestResult>, Error> {
+fn run(args: cli::CliArgs) -> Result<Vec<TestResult>, Error> {
     let config = get_config()?;
 
-    // Find all the crates on crates.io the depend on ours
-    let rev_deps = get_rev_deps(&config.crate_name, config.limit)?;
+    // Determine which dependents to test
+    let rev_deps = if !args.dependent_paths.is_empty() {
+        // Local paths mode - convert to rev dep names
+        args.dependent_paths
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| Error::InvalidPath(p.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else if !args.dependents.is_empty() {
+        // Explicit crate names from crates.io
+        args.dependents.clone()
+    } else {
+        // Top N by downloads
+        let api_deps = api::get_top_dependents(&config.crate_name, args.top_dependents)
+            .map_err(|e| Error::CratesIoApiError(e))?;
+        api_deps.into_iter().map(|d| d.name).collect()
+    };
+
+    status(&format!(
+        "testing {} reverse dependencies of {} v{}",
+        rev_deps.len(),
+        config.crate_name,
+        config.version
+    ));
 
     // Run all the tests in a thread pool and create a list of result
     // receivers.
     let mut result_rxs = Vec::new();
-    let ref mut pool = ThreadPool::new(1);
+    let ref mut pool = ThreadPool::new(args.jobs);
     for rev_dep in rev_deps {
         let result = run_test(pool, config.clone(), rev_dep);
         result_rxs.push(result);
@@ -74,6 +111,7 @@ fn run() -> Result<Vec<TestResult>, Error> {
 #[derive(Clone)]
 struct Config {
     crate_name: String,
+    version: String,
     base_override: CrateOverride,
     next_override: CrateOverride,
     limit: Option<usize>,
@@ -95,34 +133,41 @@ fn get_config() -> Result<Config, Error> {
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
 
-    let source_name = get_crate_name(&manifest)?;
+    let (crate_name, version) = get_crate_info(&manifest)?;
     Ok(Config {
-        crate_name: source_name,
+        crate_name,
+        version,
         base_override: CrateOverride::Default,
         next_override: CrateOverride::Source(manifest),
         limit,
     })
 }
 
-fn get_crate_name(manifest_path: &Path) -> Result<String, Error> {
+fn get_crate_info(manifest_path: &Path) -> Result<(String, String), Error> {
     let toml_str = load_string(manifest_path)?;
     let value: toml::Value = toml::from_str(&toml_str)?;
 
     match value.get("package") {
         Some(toml::Value::Table(t)) => {
-            match t.get("name") {
-                Some(toml::Value::String(s)) => {
-                    Ok(s.clone())
-                }
-                _ => {
-                    Err(Error::ManifestName)
-                }
-            }
+            let name = match t.get("name") {
+                Some(toml::Value::String(s)) => s.clone(),
+                _ => return Err(Error::ManifestName),
+            };
+
+            let version = match t.get("version") {
+                Some(toml::Value::String(s)) => s.clone(),
+                _ => "0.0.0".to_string(), // Default if no version
+            };
+
+            Ok((name, version))
         }
-        _ => {
-            Err(Error::ManifestName)
-        }
+        _ => Err(Error::ManifestName),
     }
+}
+
+// Legacy function for compatibility
+fn get_crate_name(manifest_path: &Path) -> Result<String, Error> {
+    get_crate_info(manifest_path).map(|(name, _)| name)
 }
 
 fn load_string(path: &Path) -> Result<String, Error> {
@@ -783,7 +828,8 @@ enum Error {
     RecvError(RecvError),
     NoCrateVersions,
     FromUtf8Error(FromUtf8Error),
-    ProcessError(String)
+    ProcessError(String),
+    InvalidPath(PathBuf),
 }
 
 macro_rules! convert_error {
@@ -820,7 +866,8 @@ impl fmt::Display for Error {
             Error::RecvError(ref e) => write!(f, "receive error: {}", e),
             Error::NoCrateVersions => write!(f, "crate has no published versions"),
             Error::FromUtf8Error(ref e) => write!(f, "UTF-8 conversion error: {}", e),
-            Error::ProcessError(ref s) => write!(f, "process error: {}", s)
+            Error::ProcessError(ref s) => write!(f, "process error: {}", s),
+            Error::InvalidPath(ref p) => write!(f, "invalid path: {}", p.display())
         }
     }
 }
