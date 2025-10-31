@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use serde::Deserialize;
 use semver::Version;
 use std::env;
 use std::error::Error as StdError;
@@ -20,11 +19,22 @@ use std::process::Command;
 use std::string::FromUtf8Error;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Sender, Receiver, RecvError};
+use std::time::Duration;
 use threadpool::ThreadPool;
 use tempfile::TempDir;
+use crates_io_api::SyncClient;
 
 use lazy_static::lazy_static;
 use log::debug;
+
+const USER_AGENT: &str = "cargo-crusader/0.1.1 (https://github.com/brson/cargo-crusader)";
+
+lazy_static! {
+    static ref CRATES_IO_CLIENT: SyncClient = {
+        SyncClient::new(USER_AGENT, Duration::from_millis(1000))
+            .expect("Failed to create crates.io API client")
+    };
+}
 
 fn main() {
     env_logger::init();
@@ -35,7 +45,7 @@ fn run() -> Result<Vec<TestResult>, Error> {
     let config = get_config()?;
 
     // Find all the crates on crates.io the depend on ours
-    let rev_deps = get_rev_deps(&config.crate_name)?;
+    let rev_deps = get_rev_deps(&config.crate_name, config.limit)?;
 
     // Run all the tests in a thread pool and create a list of result
     // receivers.
@@ -62,7 +72,8 @@ fn run() -> Result<Vec<TestResult>, Error> {
 struct Config {
     crate_name: String,
     base_override: CrateOverride,
-    next_override: CrateOverride
+    next_override: CrateOverride,
+    limit: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -77,11 +88,16 @@ fn get_config() -> Result<Config, Error> {
     let manifest = PathBuf::from(manifest);
     debug!("Using manifest {:?}", manifest);
 
+    let limit = env::var("CRUSADER_LIMIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
+
     let source_name = get_crate_name(&manifest)?;
     Ok(Config {
         crate_name: source_name,
         base_override: CrateOverride::Default,
-        next_override: CrateOverride::Source(manifest)
+        next_override: CrateOverride::Source(manifest),
+        limit,
     })
 }
 
@@ -135,30 +151,20 @@ fn crate_url_with_parms(krate: &str, call: Option<&str>, parms: &[(&str, &str)])
     }
 }
 
-fn get_rev_deps(crate_name: &str) -> Result<Vec<RevDepName>, Error> {
-    let mut all_deps = Vec::new();
+fn get_rev_deps(crate_name: &str, limit: Option<usize>) -> Result<Vec<RevDepName>, Error> {
+    status(&format!("downloading reverse deps for {}", crate_name));
 
-    let crates_per_page = 100;
-    let mut page = 1;
+    let deps = CRATES_IO_CLIENT.crate_reverse_dependencies(crate_name)
+        .map_err(|e| Error::CratesIoApiError(e.to_string()))?;
 
-    loop {
-        status(&format!("downloading reverse deps for {}", crate_name));
-        let ref url = crate_url_with_parms(crate_name, Some("reverse_dependencies"),
-                                           &[("per_page", "100"),
-                                             ("page", &page.to_string())]);
-        println!("{}", url);
-        let ref body = http_get_to_string(url)?;
-        let rev_deps = parse_rev_deps(body)?;
+    let mut all_deps: Vec<String> = deps.dependencies
+        .into_iter()
+        .map(|d| d.dependency.crate_id)
+        .collect();
 
-        let len = rev_deps.len();
-
-        all_deps.extend(rev_deps.into_iter());
-
-        if len < crates_per_page {
-            break;
-        }
-
-        page += 1;
+    // Apply limit if specified
+    if let Some(lim) = limit {
+        all_deps.truncate(lim);
     }
 
     status(&format!("{} reverse deps", all_deps.len()));
@@ -166,43 +172,16 @@ fn get_rev_deps(crate_name: &str) -> Result<Vec<RevDepName>, Error> {
     Ok(all_deps)
 }
 
-fn http_get_to_string(url: &str) -> Result<String, Error> {
-    let resp = ureq::get(url).call()?;
-    let body = resp.into_string()?;
-    Ok(body)
-}
-
 fn http_get_bytes(url: &str) -> Result<Vec<u8>, Error> {
-    let resp = ureq::get(url).call()?;
+    let resp = ureq::get(url)
+        .set("User-Agent", USER_AGENT)
+        .call()?;
     let len = resp.header("Content-Length")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
     let mut data: Vec<u8> = Vec::with_capacity(len);
     resp.into_reader().read_to_end(&mut data)?;
     Ok(data)
-}
-
-fn parse_rev_deps(s: &str) -> Result<Vec<RevDepName>, Error> {
-    #[derive(Deserialize)]
-    struct Response {
-        dependencies: Vec<Dep>,
-    }
-
-    #[derive(Deserialize)]
-    struct Dep {
-        crate_id: String
-    }
-
-    let decoded: Response = serde_json::from_str(s)?;
-
-    fn depconv(d: Dep) -> RevDepName { d.crate_id }
-
-    let revdeps = decoded.dependencies.into_iter()
-        .map(depconv).collect();
-
-    debug!("revdeps: {:?}", revdeps);
-
-    Ok(revdeps)
 }
 
 #[derive(Debug, Clone)]
@@ -368,13 +347,13 @@ fn run_test_local(config: &Config, rev_dep: RevDepName) -> TestResult {
 
 fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
     debug!("resolving current version for {}", name);
-    let ref url = crate_url(&name, None);
-    let ref body = http_get_to_string(url)?;
-    // Download the crate info from crates.io
-    let krate = parse_crate(body)?;
+
+    let krate = CRATES_IO_CLIENT.get_crate(&name)
+        .map_err(|e| Error::CratesIoApiError(e.to_string()))?;
+
     // Pull out the version numbers and sort them
     let versions = krate.versions.iter()
-        .filter_map(|r| Version::parse(&*r.num).ok());
+        .filter_map(|r| Version::parse(&r.num).ok());
     let mut versions = versions.collect::<Vec<_>>();
     versions.sort();
 
@@ -386,21 +365,6 @@ fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
     }).ok_or(Error::NoCrateVersions)
 }
 
-// The server returns much more info than this.
-// This just defines pieces we need.
-#[derive(Deserialize, Debug)]
-struct RegistryCrate {
-    versions: Vec<RegistryVersion>
-}
-
-#[derive(Deserialize, Debug)]
-struct RegistryVersion {
-    num: String
-}
-
-fn parse_crate(s: &str) -> Result<RegistryCrate, Error> {
-    Ok(serde_json::from_str(s)?)
-}
 
 #[derive(Debug, Clone)]
 struct CompileResult {
@@ -773,7 +737,7 @@ enum Error {
     TomlError(toml::de::Error),
     IoError(io::Error),
     UreqError(Box<ureq::Error>),
-    JsonError(serde_json::Error),
+    CratesIoApiError(String),
     RecvError(RecvError),
     NoCrateVersions,
     FromUtf8Error(FromUtf8Error),
@@ -792,7 +756,6 @@ macro_rules! convert_error {
 
 convert_error!(semver::Error, SemverError);
 convert_error!(io::Error, IoError);
-convert_error!(serde_json::Error, JsonError);
 convert_error!(toml::de::Error, TomlError);
 convert_error!(RecvError, RecvError);
 convert_error!(FromUtf8Error, FromUtf8Error);
@@ -811,7 +774,7 @@ impl fmt::Display for Error {
             Error::TomlError(ref e) => write!(f, "TOML parse error: {}", e),
             Error::IoError(ref e) => write!(f, "IO error: {}", e),
             Error::UreqError(ref e) => write!(f, "HTTP error: {}", e),
-            Error::JsonError(ref e) => write!(f, "JSON error: {}", e),
+            Error::CratesIoApiError(ref e) => write!(f, "crates.io API error: {}", e),
             Error::RecvError(ref e) => write!(f, "receive error: {}", e),
             Error::NoCrateVersions => write!(f, "crate has no published versions"),
             Error::FromUtf8Error(ref e) => write!(f, "UTF-8 conversion error: {}", e),
@@ -827,7 +790,6 @@ impl StdError for Error {
             Error::TomlError(ref e) => Some(e),
             Error::IoError(ref e) => Some(e),
             Error::UreqError(ref e) => Some(e.as_ref()),
-            Error::JsonError(ref e) => Some(e),
             Error::RecvError(ref e) => Some(e),
             Error::FromUtf8Error(ref e) => Some(e),
             _ => None
