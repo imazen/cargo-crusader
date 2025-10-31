@@ -11,6 +11,7 @@
 mod api;
 mod cli;
 mod compile;
+mod report;
 
 use semver::Version;
 use std::env;
@@ -52,11 +53,21 @@ fn main() {
         std::process::exit(1);
     }
 
-    report_results(run(args));
+    // Get config
+    let config = match get_config() {
+        Ok(c) => c,
+        Err(e) => {
+            report_error(e);
+            return;
+        }
+    };
+
+    // Run tests and report results
+    let results = run(args.clone(), config.clone());
+    report_results(results, &args, &config);
 }
 
-fn run(args: cli::CliArgs) -> Result<Vec<TestResult>, Error> {
-    let config = get_config()?;
+fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
 
     // Determine which dependents to test
     let rev_deps = if !args.dependent_paths.is_empty() {
@@ -603,23 +614,41 @@ fn report_quick_result(current_num: usize, total: usize, result: &TestResult) {
                result.rev_dep.name,
                result.rev_dep.vers
                );
-        print_color(&format!("{}", result.quick_str()), result.into());
+        let color = match result.data {
+            TestResultData::Passed(..) => term::color::BRIGHT_GREEN,
+            TestResultData::Regressed(..) => term::color::BRIGHT_RED,
+            TestResultData::Broken(_) => term::color::BRIGHT_YELLOW,
+            TestResultData::Error(_) => term::color::BRIGHT_MAGENTA,
+        };
+        print_color(&format!("{}", result.quick_str()), color);
         println!("");
     });
 }
 
-fn report_results(res: Result<Vec<TestResult>, Error>) {
+fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, config: &Config) {
     match res {
-        Ok(r) => {
-            match export_report(r) {
-                Ok((summary, report_path)) => report_success(summary, report_path),
+        Ok(results) => {
+            // Print console table
+            report::print_console_table(&results, &config.crate_name, &config.version);
+
+            // Generate HTML report
+            match report::export_html_report(results, &args.output) {
+                Ok(summary) => {
+                    println!("HTML report: {}", args.output.display());
+                    println!();
+
+                    // Exit with error if there were regressions
+                    if summary.regressed > 0 {
+                        std::process::exit(-2);
+                    }
+                }
                 Err(e) => {
-                    report_error(e)
+                    report_error(e);
                 }
             }
         }
         Err(e) => {
-            report_error(e)
+            report_error(e);
         }
     }
 }
@@ -633,189 +662,7 @@ fn report_error(e: Error) {
     std::process::exit(-1);
 }
 
-fn export_report(mut results: Vec<TestResult>) -> Result<(Summary, PathBuf), Error> {
-    let path = PathBuf::from("./crusader-report.html");
-    let s = summarize_results(&results);
-
-    results.sort_by(|a, b| {
-        a.rev_dep.name.cmp(&b.rev_dep.name)
-    });
-
-    let ref mut file = File::create(&path)?;
-    (writeln!(file, "<!DOCTYPE html>")?);
-
-    (writeln!(file, "<head>")?);
-    writeln!(file, "{}", r"
-
-<style>
-.passed { color: green; }
-.regressed { color: red; }
-.broken { color: yellow; }
-.error { color: magenta; }
-.stdout, .stderr, .test-exception-output { white-space: pre; }
-</style>
-
-")?;
-    (writeln!(file, "</head>")?);
-
-    (writeln!(file, "<body>")?);
-
-    // Print the summary table
-    (writeln!(file, "<h1>Summary</h1>")?);
-    (writeln!(file, "<table>")?);
-    (writeln!(file, "<tr><th>Crate</th><th>Version</th><th>Result</th></tr>")?);
-    for result in &results {
-        (writeln!(file, "<tr>")?);
-        (writeln!(file, "<td>")?);
-        (writeln!(file, "<a href='#{}'>", result.html_anchor()))?;
-        (writeln!(file, "{}", result.rev_dep.name))?;
-        (writeln!(file, "</a>"))?;
-        (writeln!(file, "</td>"))?;
-        (writeln!(file, "<td>{}</td>", result.rev_dep.vers))?;
-        (writeln!(file, "<td class='{}'>{}</td>", result.html_class(), result.quick_str()))?;
-        (writeln!(file, "</tr>")?);
-    }
-    (writeln!(file, "</table>")?);
-
-    (writeln!(file, "<h1>Details</h1>")?);
-    for result in results {
-        (writeln!(file, "<div class='complete-result'>")?);
-        (writeln!(file, "<a name='{}'></a>", result.html_anchor()))?;
-        (writeln!(file, "<h2>"))?;
-        (writeln!(file, "<span>{} {}</span>", result.rev_dep.name, result.rev_dep.vers))?;
-        (writeln!(file, "<span class='{}'>{}</span>", result.html_class(), result.quick_str()))?;
-        (writeln!(file, "</h2>")?);
-        match &result.data {
-            TestResultData::Passed(four_step) |
-            TestResultData::Regressed(four_step) => {
-                (export_compile_result(file, "baseline check", &four_step.baseline_check)?);
-                if let Some(ref test) = four_step.baseline_test {
-                    (export_compile_result(file, "baseline test", test)?);
-                }
-                if let Some(ref check) = four_step.override_check {
-                    (export_compile_result(file, "override check", check)?);
-                }
-                if let Some(ref test) = four_step.override_test {
-                    (export_compile_result(file, "override test", test)?);
-                }
-            }
-            TestResultData::Broken(four_step) => {
-                (export_compile_result(file, "baseline check", &four_step.baseline_check)?);
-                if let Some(ref test) = four_step.baseline_test {
-                    (export_compile_result(file, "baseline test", test)?);
-                }
-            }
-            TestResultData::Error(e) => {
-                (export_error(file, e)?);
-            }
-        }
-        (writeln!(file, "</div>")?);
-    }
-    
-    (writeln!(file, "</body>")?);
-
-    Ok((s, path))
-}
-
-fn export_compile_result(file: &mut File, label: &str, r: &CompileResult) -> Result<(), Error> {
-    let stdout = sanitize(&r.stdout);
-    let stderr = sanitize(&r.stderr);
-    let success_marker = if r.success { "✓" } else { "✗" };
-    let duration_str = format!("{:.2}s", r.duration.as_secs_f64());
-    (writeln!(file, "<h3>{} {} ({})</h3>", label, success_marker, duration_str)?);
-    (writeln!(file, "<div class='stdout'>\n{}\n</div>", stdout)?);
-    (writeln!(file, "<div class='stderr'>\n{}\n</div>", stderr)?);
-
-    Ok(())
-}
-
-fn export_error(file: &mut File, e: &Error) -> Result<(), Error> {
-    let err = sanitize(&format!("{}", e));
-    (writeln!(file, "<h3>{}</h3>", "errors")?);
-    (writeln!(file, "<div class='test-exception-output'>\n{}\n</div>", err)?);
-
-    Ok(())
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars().flat_map(|c| {
-        match c {
-            '<' => "&lt;".chars().collect(),
-            '>' => "&gt;".chars().collect(),
-            '&' => "&amp;".chars().collect(),
-            _ => vec![c]
-        }
-    }).collect()
-}
-
-enum ReportResult { Passed, Regressed, Broken, Error }
-
-impl Into<term::color::Color> for ReportResult {
-    fn into(self) -> term::color::Color {
-        match self {
-            ReportResult::Passed => term::color::BRIGHT_GREEN,
-            ReportResult::Regressed => term::color::BRIGHT_RED,
-            ReportResult::Broken => term::color::BRIGHT_YELLOW,
-            ReportResult::Error => term::color::BRIGHT_MAGENTA,
-        }
-    }
-}
-
-impl<'a> Into<term::color::Color> for &'a TestResult {
-    fn into(self) -> term::color::Color {
-        match self.data {
-            TestResultData::Passed(..) => ReportResult::Passed,
-            TestResultData::Regressed(..) => ReportResult::Regressed,
-            TestResultData::Broken(_) => ReportResult::Broken,
-            TestResultData::Error(_) => ReportResult::Error,
-        }.into()
-    }
-}
-
-fn report_success(s: Summary, p: PathBuf) {
-    println!("");
-    print!("passed: ");
-    print_color(&format!("{}", s.passed), ReportResult::Passed.into());
-    println!("");
-    print!("regressed: ");
-    print_color(&format!("{}", s.regressed), ReportResult::Regressed.into());
-    println!("");
-    print!("broken: ");
-    print_color(&format!("{}", s.broken), ReportResult::Broken.into());
-    println!("");
-    print!("error: ");
-    print_color(&format!("{}", s.error), ReportResult::Error.into());
-    println!("");
-
-    println!("");
-    println!("full report: {}", p.to_str().unwrap());
-    println!("");
-    
-    if s.regressed > 0 { std::process::exit(-2) }
-}
-
-#[derive(Default)]
-struct Summary {
-    broken: usize,
-    regressed: usize,
-    passed: usize,
-    error: usize
-}
-
-fn summarize_results(results: &[TestResult]) -> Summary {
-    let mut sum = Summary::default();
-
-    for result in results {
-        match result.data {
-            TestResultData::Broken(..) => sum.broken += 1,
-            TestResultData::Regressed(..) => sum.regressed += 1,
-            TestResultData::Passed(..) => sum.passed += 1,
-            TestResultData::Error(..) => sum.error += 1,
-        }
-    }
-
-    return sum;
-}
+// Report generation functions moved to src/report.rs
 
 #[derive(Debug)]
 enum Error {
