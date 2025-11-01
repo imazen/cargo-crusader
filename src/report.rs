@@ -286,6 +286,230 @@ fn format_step(result: &CompileResult) -> String {
     format!("{} {}", marker, duration)
 }
 
+/// Export markdown analysis report for AI/LLM analysis
+pub fn export_markdown_report(
+    results: &[TestResult],
+    output_path: &PathBuf,
+    crate_name: &str,
+    crate_version: &str,
+) -> Result<Summary, Error> {
+    let summary = summarize_results(results);
+
+    let mut file = File::create(output_path)?;
+
+    // Title and summary
+    writeln!(file, "# Cargo Crusader Analysis Report\n")?;
+    writeln!(file, "**Crate**: {} v{}\n", crate_name, crate_version)?;
+
+    writeln!(file, "## Summary Statistics\n")?;
+    writeln!(file, "| Status | Count |")?;
+    writeln!(file, "|--------|-------|")?;
+    writeln!(file, "| ✅ Passed | {} |", summary.passed)?;
+    writeln!(file, "| ❌ Regressed | {} |", summary.regressed)?;
+    writeln!(file, "| ⚠️ Broken | {} |", summary.broken)?;
+    writeln!(file, "| ⊘ Skipped | {} |", summary.skipped)?;
+    writeln!(file, "| ⚡ Error | {} |", summary.error)?;
+    writeln!(file, "| **Total** | **{}** |\n", summary.total())?;
+
+    // Regressions section (most important)
+    if summary.regressed > 0 {
+        writeln!(file, "## ⚠️ Regressions (Breaking Changes)\n")?;
+        writeln!(file, "These crates compiled successfully with the published version but fail with your WIP changes.")?;
+        writeln!(file, "**Action required**: These are breaking changes that need attention.\n")?;
+
+        for result in results.iter().filter(|r| matches!(r.data, TestResultData::Regressed(_))) {
+            export_regression_markdown(&mut file, result)?;
+        }
+    }
+
+    // Broken crates section (pre-existing issues)
+    if summary.broken > 0 {
+        writeln!(file, "## 🔧 Broken Crates (Pre-existing Issues)\n")?;
+        writeln!(file, "These crates already fail to compile with the published baseline version.")?;
+        writeln!(file, "**No action needed**: These issues exist independently of your changes.\n")?;
+
+        for result in results.iter().filter(|r| matches!(r.data, TestResultData::Broken(_))) {
+            export_broken_markdown(&mut file, result)?;
+        }
+    }
+
+    // Skipped crates
+    if summary.skipped > 0 {
+        writeln!(file, "## ⊘ Skipped Crates (Version Incompatibility)\n")?;
+        writeln!(file, "These crates were skipped because their version requirements are incompatible with your WIP version.\n")?;
+
+        for result in results.iter().filter(|r| matches!(r.data, TestResultData::Skipped(_))) {
+            if let TestResultData::Skipped(reason) = &result.data {
+                writeln!(file, "### {} v{}", result.rev_dep.name, result.rev_dep.vers)?;
+                writeln!(file, "**Reason**: {}\n", reason)?;
+            }
+        }
+    }
+
+    // Passed crates (brief summary)
+    if summary.passed > 0 {
+        writeln!(file, "## ✅ Passed Crates\n")?;
+        writeln!(file, "The following {} crates compiled successfully with your changes:\n", summary.passed)?;
+
+        let passed_names: Vec<String> = results.iter()
+            .filter(|r| matches!(r.data, TestResultData::Passed(_)))
+            .map(|r| format!("`{}` v{}", r.rev_dep.name, r.rev_dep.vers))
+            .collect();
+
+        // Show as bullet list
+        for name in passed_names {
+            writeln!(file, "- {}", name)?;
+        }
+        writeln!(file)?;
+    }
+
+    // Errors
+    if summary.error > 0 {
+        writeln!(file, "## ⚡ Errors\n")?;
+        writeln!(file, "These crates encountered internal errors during testing:\n")?;
+
+        for result in results.iter().filter(|r| matches!(r.data, TestResultData::Error(_))) {
+            if let TestResultData::Error(e) = &result.data {
+                writeln!(file, "### {} v{}", result.rev_dep.name, result.rev_dep.vers)?;
+                writeln!(file, "```")?;
+                writeln!(file, "{}", e)?;
+                writeln!(file, "```\n")?;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Export a regression to markdown format
+fn export_regression_markdown(file: &mut File, result: &TestResult) -> Result<(), Error> {
+    writeln!(file, "### {} v{}\n", result.rev_dep.name, result.rev_dep.vers)?;
+    writeln!(file, "**Status**: ❌ REGRESSED")?;
+    writeln!(file, "**Crates.io**: https://crates.io/crates/{}\n", result.rev_dep.name)?;
+
+    if let TestResultData::Regressed(four_step) = &result.data {
+        // Show step results
+        writeln!(file, "#### Build Results\n")?;
+        writeln!(file, "| Step | Baseline | Override |")?;
+        writeln!(file, "|------|----------|----------|")?;
+
+        let baseline_check_result = if four_step.baseline_check.success { "✅" } else { "❌" };
+        let baseline_test_result = if let Some(ref t) = four_step.baseline_test {
+            if t.success { "✅" } else { "❌" }
+        } else { "⊘" };
+        let override_check_result = if let Some(ref c) = four_step.override_check {
+            if c.success { "✅" } else { "❌" }
+        } else { "⊘" };
+        let override_test_result = if let Some(ref t) = four_step.override_test {
+            if t.success { "✅" } else { "❌" }
+        } else { "⊘" };
+
+        writeln!(file, "| Check | {} {:.1}s | {} {:.1}s |",
+                 baseline_check_result,
+                 four_step.baseline_check.duration.as_secs_f64(),
+                 override_check_result,
+                 four_step.override_check.as_ref().map(|c| c.duration.as_secs_f64()).unwrap_or(0.0))?;
+
+        writeln!(file, "| Test | {} {:.1}s | {} {:.1}s |\n",
+                 baseline_test_result,
+                 four_step.baseline_test.as_ref().map(|t| t.duration.as_secs_f64()).unwrap_or(0.0),
+                 override_test_result,
+                 four_step.override_test.as_ref().map(|t| t.duration.as_secs_f64()).unwrap_or(0.0))?;
+
+        // Show error details
+        writeln!(file, "#### Error Details\n")?;
+
+        let failed_step = if let Some(ref check) = four_step.override_check {
+            if check.failed() {
+                Some(("Override Check", check))
+            } else {
+                four_step.override_test.as_ref().map(|t| ("Override Test", t))
+            }
+        } else {
+            None
+        };
+
+        if let Some((step_name, step_result)) = failed_step {
+            writeln!(file, "**Failed Step**: {}\n", step_name)?;
+
+            // Show diagnostics if available
+            if !step_result.diagnostics.is_empty() {
+                let errors: Vec<_> = step_result.diagnostics.iter()
+                    .filter(|d| d.level.is_error())
+                    .collect();
+
+                for (i, diag) in errors.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(file)?;
+                    }
+
+                    if let Some(code) = &diag.code {
+                        writeln!(file, "**Error [{}]**: {}", code, diag.message)?;
+                    } else {
+                        writeln!(file, "**Error**: {}", diag.message)?;
+                    }
+
+                    if let Some(span) = &diag.primary_span {
+                        writeln!(file, "- **Location**: `{}:{}:{}`", span.file_name, span.line, span.column)?;
+                        if let Some(label) = &span.label {
+                            writeln!(file, "- **Detail**: {}", label)?;
+                        }
+                    }
+
+                    writeln!(file, "\n```")?;
+                    writeln!(file, "{}", diag.rendered.trim())?;
+                    writeln!(file, "```")?;
+                }
+            } else if !step_result.stderr.is_empty() {
+                // Fallback: extract errors from stderr
+                writeln!(file, "```")?;
+                for line in step_result.stderr.lines().take(30) {
+                    writeln!(file, "{}", line)?;
+                }
+                if step_result.stderr.lines().count() > 30 {
+                    writeln!(file, "... (truncated)")?;
+                }
+                writeln!(file, "```")?;
+            }
+        }
+
+        writeln!(file)?;
+    }
+
+    Ok(())
+}
+
+/// Export a broken crate to markdown format
+fn export_broken_markdown(file: &mut File, result: &TestResult) -> Result<(), Error> {
+    writeln!(file, "### {} v{}\n", result.rev_dep.name, result.rev_dep.vers)?;
+    writeln!(file, "**Status**: ⚠️ BROKEN (pre-existing)")?;
+    writeln!(file, "**Crates.io**: https://crates.io/crates/{}\n", result.rev_dep.name)?;
+
+    if let TestResultData::Broken(four_step) = &result.data {
+        let failed_step = if four_step.baseline_check.failed() {
+            Some(("Baseline Check", &four_step.baseline_check))
+        } else {
+            four_step.baseline_test.as_ref().map(|t| ("Baseline Test", t))
+        };
+
+        if let Some((step_name, step_result)) = failed_step {
+            writeln!(file, "**Failed Step**: {}\n", step_name)?;
+
+            // Brief error summary
+            if !step_result.diagnostics.is_empty() {
+                let error_count = step_result.diagnostics.iter()
+                    .filter(|d| d.level.is_error())
+                    .count();
+                writeln!(file, "**Errors**: {} compilation error(s)\n", error_count)?;
+            } else {
+                writeln!(file, "**Note**: Failed with published baseline version\n")?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Export HTML report to file
 pub fn export_html_report(
     mut results: Vec<TestResult>,

@@ -749,6 +749,23 @@ fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, conf
             // Print console table
             report::print_console_table(&results, &config.crate_name, &config.version);
 
+            // Generate markdown analysis report
+            let markdown_path = args.output.with_extension("").with_extension("md")
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(|f| f.replace(".html", "-analysis"))
+                .map(|f| PathBuf::from(format!("{}.md", f)))
+                .unwrap_or_else(|| PathBuf::from("crusader-analysis.md"));
+
+            match report::export_markdown_report(&results, &markdown_path, &config.crate_name, &config.version) {
+                Ok(_) => {
+                    println!("Markdown report: {}", markdown_path.display());
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to generate markdown report: {}", e);
+                }
+            }
+
             // Generate HTML report
             match report::export_html_report(results, &args.output) {
                 Ok(summary) => {
