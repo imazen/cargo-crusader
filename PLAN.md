@@ -1,6 +1,6 @@
 # Cargo Crusader - Implementation Plan
 
-This document tracks remaining work and next steps. For completed work, see commit history and HANDOFF.md.
+This document tracks remaining work and next steps. For completed work, see commit history.
 
 ---
 
@@ -235,23 +235,10 @@ Create `tests/live_integration_test.rs` with `#[ignore]` tests against real crat
 
 After Phase 5 completion:
 
-**EXAMPLES.md**:
-- Remove "⚠️ NOT YET IMPLEMENTED" warnings
-- Add real --test-versions examples with output
-- Update troubleshooting section
-
-**SPEC.md**:
-- Move target structures to current implementation
-- Update console output examples
-- Document baseline inference logic
-
 **README.md**:
 - Move multi-version testing to "✅ Currently Available"
-- Remove "Future:" prefixes
-
-**HANDOFF.md**:
-- Mark Phase 5 as completed
-- Update to Phase 6 plan
+- Update output format examples with actual ICT implementation
+- Update CLI reference with finalized --test-versions behavior
 
 ---
 
@@ -313,7 +300,5 @@ None currently. Baseline inference logic is now clear and simple.
 
 ## Links
 
-- **Detailed Phase 5 Plan**: See [HANDOFF.md](HANDOFF.md)
-- **Technical Spec**: See [SPEC.md](SPEC.md)
-- **Usage Examples**: See [EXAMPLES.md](EXAMPLES.md)
 - **Project Overview**: See [README.md](README.md)
+- **AI Guidance**: See [CLAUDE.md](CLAUDE.md)

@@ -48,10 +48,6 @@ pub struct CliArgs {
     #[arg(long)]
     pub no_test: bool,
 
-    /// Keep temporary build directories for debugging
-    #[arg(long)]
-    pub keep_tmp: bool,
-
     /// Output results as JSON
     #[arg(long)]
     pub json: bool,
@@ -110,7 +106,6 @@ mod tests {
             staging_dir: PathBuf::from(".crusader/staging"),
             no_check: true,
             no_test: true,
-            keep_tmp: false,
             json: false,
         };
         assert!(args.validate().is_err());
@@ -129,7 +124,6 @@ mod tests {
             staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
-            keep_tmp: false,
             json: false,
         };
         assert!(args.validate().is_err());
@@ -148,7 +142,6 @@ mod tests {
             staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
-            keep_tmp: false,
             json: false,
         };
         assert!(args.validate().is_ok());
@@ -167,7 +160,6 @@ mod tests {
             staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
-            keep_tmp: false,
             json: false,
         };
         assert!(args.is_offline_mode());
@@ -186,7 +178,6 @@ mod tests {
             staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
-            keep_tmp: false,
             json: false,
         };
         assert!(!args.is_offline_mode());
