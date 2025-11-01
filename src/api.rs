@@ -63,8 +63,8 @@ pub fn get_reverse_dependencies(
         // Extract dependency info
         for dep in deps.dependencies {
             all_deps.push(ReverseDependency {
-                name: dep.dependency.crate_id.clone(),
-                downloads: dep.dependency.downloads,
+                name: dep.crate_version.crate_name.clone(),
+                downloads: dep.crate_version.downloads,
             });
         }
 
