@@ -12,12 +12,13 @@ pub struct Summary {
     pub broken: usize,
     pub regressed: usize,
     pub passed: usize,
+    pub skipped: usize,
     pub error: usize,
 }
 
 impl Summary {
     pub fn total(&self) -> usize {
-        self.broken + self.regressed + self.passed + self.error
+        self.broken + self.regressed + self.passed + self.skipped + self.error
     }
 }
 
@@ -30,6 +31,7 @@ pub fn summarize_results(results: &[TestResult]) -> Summary {
             TestResultData::Broken(..) => sum.broken += 1,
             TestResultData::Regressed(..) => sum.regressed += 1,
             TestResultData::Passed(..) => sum.passed += 1,
+            TestResultData::Skipped(_) => sum.skipped += 1,
             TestResultData::Error(..) => sum.error += 1,
         }
     }
@@ -105,6 +107,10 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_versi
                 println!("│{:<30}│{:^15}│{:^14}│{:^15}│{:^15}│",
                          name, base_check, base_test, "(skipped)", "(skipped)");
             }
+            TestResultData::Skipped(_) => {
+                println!("│{:<30}│{:^15}│{:^14}│{:^15}│{:^15}│",
+                         name, "SKIPPED", "(incompatible)", "", "");
+            }
             TestResultData::Error(_) => {
                 println!("│{:<30}│{:^15}│{:^14}│{:^15}│{:^15}│",
                          name, "ERROR", "", "", "");
@@ -122,6 +128,7 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_versi
     println!("  ✓ Passed:    {}", summary.passed);
     println!("  ✗ Regressed: {}", summary.regressed);
     println!("  ⚠ Broken:    {}", summary.broken);
+    println!("  ⊘ Skipped:   {}", summary.skipped);
     println!("  ⚡ Error:     {}", summary.error);
     println!("  ━━━━━━━━━━━━━");
     println!("  Total:       {}", summary.total());
@@ -157,6 +164,7 @@ th { background-color: #f2f2f2; }
 .passed { color: green; font-weight: bold; }
 .regressed { color: red; font-weight: bold; }
 .broken { color: orange; font-weight: bold; }
+.skipped { color: gray; font-weight: bold; }
 .error { color: magenta; font-weight: bold; }
 .stdout, .stderr, .test-exception-output {
     white-space: pre;
@@ -174,6 +182,7 @@ h3 { margin-top: 15px; color: #333; }
 .stat-passed { background: #d4edda; color: #155724; }
 .stat-regressed { background: #f8d7da; color: #721c24; }
 .stat-broken { background: #fff3cd; color: #856404; }
+.stat-skipped { background: #e2e3e5; color: #383d41; }
 .stat-error { background: #f5c6cb; color: #721c24; }
 .stat-number { font-size: 32px; font-weight: bold; }
 .stat-label { font-size: 14px; }
@@ -200,6 +209,11 @@ h3 { margin-top: 15px; color: #333; }
         file,
         "<div class='stat stat-broken'><div class='stat-number'>{}</div><div class='stat-label'>Broken</div></div>",
         summary.broken
+    )?;
+    writeln!(
+        file,
+        "<div class='stat stat-skipped'><div class='stat-number'>{}</div><div class='stat-label'>Skipped</div></div>",
+        summary.skipped
     )?;
     writeln!(
         file,
@@ -271,6 +285,10 @@ h3 { margin-top: 15px; color: #333; }
                     export_compile_result(&mut file, "baseline test", test)?;
                 }
             }
+            TestResultData::Skipped(reason) => {
+                writeln!(file, "<h3>Skipped</h3>")?;
+                writeln!(file, "<p>Reason: {}</p>", sanitize(reason))?;
+            }
             TestResultData::Error(e) => {
                 export_error(&mut file, e)?;
             }
@@ -340,6 +358,7 @@ mod tests {
         assert_eq!(summary.passed, 0);
         assert_eq!(summary.regressed, 0);
         assert_eq!(summary.broken, 0);
+        assert_eq!(summary.skipped, 0);
         assert_eq!(summary.error, 0);
         assert_eq!(summary.total(), 0);
     }
@@ -350,9 +369,10 @@ mod tests {
             passed: 5,
             regressed: 2,
             broken: 1,
+            skipped: 3,
             error: 1,
         };
-        assert_eq!(summary.total(), 9);
+        assert_eq!(summary.total(), 12);
     }
 
     #[test]

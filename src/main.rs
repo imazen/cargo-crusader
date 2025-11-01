@@ -260,6 +260,7 @@ enum TestResultData {
     Passed(compile::FourStepResult),
     Regressed(compile::FourStepResult),
     Broken(compile::FourStepResult),
+    Skipped(String), // Skipped with reason (e.g., version incompatibility)
     Error(Error),
 }
 
@@ -317,18 +318,26 @@ impl TestResult {
         }
     }
 
+    fn skipped(rev_dep: RevDep, reason: String) -> TestResult {
+        TestResult {
+            rev_dep,
+            data: TestResultData::Skipped(reason)
+        }
+    }
+
     fn error(rev_dep: RevDep, e: Error) -> TestResult {
         TestResult {
             rev_dep,
             data: TestResultData::Error(e)
         }
     }
-    
+
     fn quick_str(&self) -> &'static str {
         match self.data {
             TestResultData::Passed(..) => "passed",
             TestResultData::Regressed(..) => "regressed",
             TestResultData::Broken(_) => "broken",
+            TestResultData::Skipped(_) => "skipped",
             TestResultData::Error(_) => "error"
         }
     }
@@ -413,9 +422,25 @@ fn run_test_local(config: &Config, rev_dep: RevDepName) -> TestResult {
         }
     };
 
-    // TODO: Decide whether the version of our crate requested by the
-    // rev dep is semver-compatible with the in-development version.
-    
+    // Check if the dependent's version requirement is compatible with our WIP version
+    match check_version_compatibility(&rev_dep, &config) {
+        Ok(true) => {
+            // Compatible, continue testing
+        }
+        Ok(false) => {
+            // Incompatible, skip testing
+            let reason = format!(
+                "Dependent requires version incompatible with {} v{}",
+                config.crate_name, config.version
+            );
+            return TestResult::skipped(rev_dep, reason);
+        }
+        Err(e) => {
+            debug!("Failed to check version compatibility: {}, testing anyway", e);
+            // Continue testing if we can't determine compatibility
+        }
+    }
+
     let base_result = match compile_with_custom_dep(&rev_dep, &config.base_override) {
         Ok(r) => r,
         Err(e) => return TestResult::error(rev_dep, e)
@@ -434,6 +459,91 @@ fn run_test_local(config: &Config, rev_dep: RevDepName) -> TestResult {
     } else {
         TestResult::passed(rev_dep, base_result, next_result)
     }
+}
+
+fn check_version_compatibility(rev_dep: &RevDep, config: &Config) -> Result<bool, Error> {
+    debug!("checking version compatibility for {} {}", rev_dep.name, rev_dep.vers);
+
+    // Download and cache the dependent's .crate file
+    let crate_handle = get_crate_handle(rev_dep)?;
+
+    // Create temp directory to extract Cargo.toml
+    let temp_dir = TempDir::new()?;
+    let extract_dir = temp_dir.path().join("extracted");
+    fs::create_dir(&extract_dir)?;
+
+    // Extract just the Cargo.toml
+    let mut cmd = Command::new("tar");
+    let cmd = cmd
+        .arg("xzf")
+        .arg(&crate_handle.0)
+        .arg("--strip-components=1")
+        .arg("-C")
+        .arg(&extract_dir)
+        .arg("--wildcards")
+        .arg("*/Cargo.toml");
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        return Err(Error::ProcessError("Failed to extract Cargo.toml".to_string()));
+    }
+
+    // Read and parse Cargo.toml
+    let toml_path = extract_dir.join("Cargo.toml");
+    let toml_str = load_string(&toml_path)?;
+    let value: toml::Value = toml::from_str(&toml_str)?;
+
+    // Look for our crate in dependencies
+    let our_crate = &config.crate_name;
+    let wip_version = Version::parse(&config.version)?;
+
+    // Check [dependencies]
+    if let Some(deps) = value.get("dependencies").and_then(|v| v.as_table()) {
+        if let Some(req) = deps.get(our_crate) {
+            return check_requirement(req, &wip_version);
+        }
+    }
+
+    // Check [dev-dependencies]
+    if let Some(deps) = value.get("dev-dependencies").and_then(|v| v.as_table()) {
+        if let Some(req) = deps.get(our_crate) {
+            return check_requirement(req, &wip_version);
+        }
+    }
+
+    // Check [build-dependencies]
+    if let Some(deps) = value.get("build-dependencies").and_then(|v| v.as_table()) {
+        if let Some(req) = deps.get(our_crate) {
+            return check_requirement(req, &wip_version);
+        }
+    }
+
+    // Crate not found in dependencies (shouldn't happen for reverse deps)
+    debug!("Warning: {} not found in {}'s dependencies", our_crate, rev_dep.name);
+    Ok(true) // Test anyway
+}
+
+fn check_requirement(req: &toml::Value, wip_version: &Version) -> Result<bool, Error> {
+    use semver::VersionReq;
+
+    let req_str = match req {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Table(t) => {
+            // Handle { version = "1.0", features = [...] } format
+            t.get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("*")
+                .to_string()
+        }
+        _ => "*".to_string(),
+    };
+
+    debug!("Checking if version {} satisfies requirement '{}'", wip_version, req_str);
+
+    let version_req = VersionReq::parse(&req_str)
+        .map_err(|e| Error::SemverError(e))?;
+
+    Ok(version_req.matches(wip_version))
 }
 
 fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
@@ -618,6 +728,7 @@ fn report_quick_result(current_num: usize, total: usize, result: &TestResult) {
             TestResultData::Passed(..) => term::color::BRIGHT_GREEN,
             TestResultData::Regressed(..) => term::color::BRIGHT_RED,
             TestResultData::Broken(_) => term::color::BRIGHT_YELLOW,
+            TestResultData::Skipped(_) => term::color::BRIGHT_CYAN,
             TestResultData::Error(_) => term::color::BRIGHT_MAGENTA,
         };
         print_color(&format!("{}", result.quick_str()), color);
@@ -730,5 +841,98 @@ impl StdError for Error {
             Error::FromUtf8Error(ref e) => Some(e),
             _ => None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use semver::Version;
+
+    #[test]
+    fn test_check_requirement_string_exact_version() {
+        let req = toml::Value::String("0.2.0".to_string());
+        let version = Version::parse("0.2.0").unwrap();
+
+        assert!(check_requirement(&req, &version).unwrap());
+    }
+
+    #[test]
+    fn test_check_requirement_string_caret() {
+        let req = toml::Value::String("^0.1.0".to_string());
+        let version_compatible = Version::parse("0.1.5").unwrap();
+        let version_incompatible = Version::parse("0.2.0").unwrap();
+
+        assert!(check_requirement(&req, &version_compatible).unwrap());
+        assert!(!check_requirement(&req, &version_incompatible).unwrap());
+    }
+
+    #[test]
+    fn test_check_requirement_string_tilde() {
+        let req = toml::Value::String("~0.1.0".to_string());
+        let version_compatible = Version::parse("0.1.9").unwrap();
+        let version_incompatible = Version::parse("0.2.0").unwrap();
+
+        assert!(check_requirement(&req, &version_compatible).unwrap());
+        assert!(!check_requirement(&req, &version_incompatible).unwrap());
+    }
+
+    #[test]
+    fn test_check_requirement_wildcard() {
+        let req = toml::Value::String("*".to_string());
+        let version = Version::parse("999.999.999").unwrap();
+
+        assert!(check_requirement(&req, &version).unwrap());
+    }
+
+    #[test]
+    fn test_check_requirement_table_with_version() {
+        use toml::map::Map;
+
+        let mut table = Map::new();
+        table.insert("version".to_string(), toml::Value::String("^0.1.0".to_string()));
+        table.insert("features".to_string(), toml::Value::Array(vec![]));
+        let req = toml::Value::Table(table);
+
+        let version_compatible = Version::parse("0.1.5").unwrap();
+        let version_incompatible = Version::parse("0.2.0").unwrap();
+
+        assert!(check_requirement(&req, &version_compatible).unwrap());
+        assert!(!check_requirement(&req, &version_incompatible).unwrap());
+    }
+
+    #[test]
+    fn test_check_requirement_table_without_version() {
+        use toml::map::Map;
+
+        let mut table = Map::new();
+        table.insert("path".to_string(), toml::Value::String("../local".to_string()));
+        let req = toml::Value::Table(table);
+
+        // Table without version field should default to "*" (wildcard)
+        let version = Version::parse("999.999.999").unwrap();
+        assert!(check_requirement(&req, &version).unwrap());
+    }
+
+    #[test]
+    fn test_check_requirement_gte_operator() {
+        let req = toml::Value::String(">=0.1.0".to_string());
+        let version_compatible = Version::parse("0.2.0").unwrap();
+        let version_incompatible = Version::parse("0.0.9").unwrap();
+
+        assert!(check_requirement(&req, &version_compatible).unwrap());
+        assert!(!check_requirement(&req, &version_incompatible).unwrap());
+    }
+
+    #[test]
+    fn test_check_requirement_complex_range() {
+        let req = toml::Value::String(">=0.1.0, <0.3.0".to_string());
+        let version_compatible1 = Version::parse("0.1.5").unwrap();
+        let version_compatible2 = Version::parse("0.2.9").unwrap();
+        let version_incompatible = Version::parse("0.3.0").unwrap();
+
+        assert!(check_requirement(&req, &version_compatible1).unwrap());
+        assert!(check_requirement(&req, &version_compatible2).unwrap());
+        assert!(!check_requirement(&req, &version_incompatible).unwrap());
     }
 }
