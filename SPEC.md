@@ -88,14 +88,6 @@ OPTIONS:
       Without --path, warns about missing WIP version
       Examples: --test-versions 0.3.0 4.1.1
 
-  --baseline <REF>
-      Git reference for baseline (tag/commit/branch)
-      (Not yet implemented)
-
-  --baseline-path <PATH>
-      Use local path as baseline instead of published version
-      (Not yet implemented)
-
   -j, --jobs <N>
       Number of parallel test jobs [default: 1]
       Parallelizes among dependents, not within
@@ -124,7 +116,6 @@ OPTIONS:
 ### Validation Rules
 
 - Cannot specify both `--no-check` and `--no-test`
-- Cannot specify both `--baseline` and `--baseline-path`
 - Must specify at least one of: `--top-dependents`, `--dependents`, or `--dependent-paths`
 - `--jobs` must be at least 1
 
@@ -442,7 +433,6 @@ pub fn new_api() -> i32 { 1 }
 - Live integration tests against real crates.io
 
 ### 💭 Future Enhancements
-- --baseline and --baseline-path git reference testing
 - --json output format
 - Parallel version testing (within dependent)
 - Smart error summarization

@@ -34,16 +34,6 @@ fn test_dependent_paths_parsing() {
 }
 
 #[test]
-fn test_baseline_git_ref() {
-    // TODO: Test --baseline v1.0.0
-}
-
-#[test]
-fn test_conflicting_baseline_options() {
-    // TODO: Test that --baseline and --baseline-path can't be used together
-}
-
-#[test]
 fn test_both_no_flags_rejected() {
     // TODO: Test that --no-check --no-test is rejected
 }

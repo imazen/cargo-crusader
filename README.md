@@ -77,7 +77,6 @@ Markdown report: crusader-report.md
 
 ### 💭 Planned
 
-- **Baseline Testing**: Test against git refs with `--baseline`
 - **JSON Output**: Machine-readable results for CI integration
 - **Docker Support**: Official sandboxed container images
 
@@ -191,8 +190,6 @@ For complete documentation, see **[EXAMPLES.md](EXAMPLES.md)**
 
 ```
 --test-versions <VER>...        Test against multiple base crate versions
---baseline <REF>                Git ref for baseline comparison
---baseline-path <PATH>          Local path as baseline
 --json                          JSON output format
 ```
 

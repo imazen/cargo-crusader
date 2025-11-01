@@ -28,14 +28,6 @@ pub struct CliArgs {
     #[arg(long, value_name = "VERSION")]
     pub test_versions: Vec<String>,
 
-    /// Git reference for baseline (tag/commit/branch)
-    #[arg(long, value_name = "REF")]
-    pub baseline: Option<String>,
-
-    /// Use local path as baseline instead of published version
-    #[arg(long, value_name = "PATH")]
-    pub baseline_path: Option<PathBuf>,
-
     /// Number of parallel test jobs
     #[arg(long, short = 'j', default_value = "1")]
     pub jobs: usize,
@@ -78,11 +70,6 @@ impl CliArgs {
             return Err("Cannot specify both --no-check and --no-test".to_string());
         }
 
-        // Can't specify both baseline options
-        if self.baseline.is_some() && self.baseline_path.is_some() {
-            return Err("Cannot specify both --baseline and --baseline-path".to_string());
-        }
-
         // Need at least one of: top_dependents, dependents, or dependent_paths
         if self.top_dependents == 0
             && self.dependents.is_empty()
@@ -118,34 +105,11 @@ mod tests {
             dependents: vec![],
             dependent_paths: vec![],
             test_versions: vec![],
-            baseline: None,
-            baseline_path: None,
             jobs: 1,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
             no_check: true,
             no_test: true,
-            keep_tmp: false,
-            json: false,
-        };
-        assert!(args.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_both_baseline_options_fails() {
-        let args = CliArgs {
-            path: None,
-            top_dependents: 5,
-            dependents: vec![],
-            dependent_paths: vec![],
-            test_versions: vec![],
-            baseline: Some("v1.0.0".to_string()),
-            baseline_path: Some(PathBuf::from("/tmp/baseline")),
-            jobs: 1,
-            output: PathBuf::from("report.html"),
-            staging_dir: PathBuf::from(".crusader/staging"),
-            no_check: false,
-            no_test: false,
             keep_tmp: false,
             json: false,
         };
@@ -160,8 +124,6 @@ mod tests {
             dependents: vec![],
             dependent_paths: vec![],
             test_versions: vec![],
-            baseline: None,
-            baseline_path: None,
             jobs: 0,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
@@ -181,8 +143,6 @@ mod tests {
             dependents: vec![],
             dependent_paths: vec![],
             test_versions: vec![],
-            baseline: None,
-            baseline_path: None,
             jobs: 1,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
@@ -202,8 +162,6 @@ mod tests {
             dependents: vec![],
             dependent_paths: vec![PathBuf::from("/tmp/crate")],
             test_versions: vec![],
-            baseline: None,
-            baseline_path: None,
             jobs: 1,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
@@ -223,8 +181,6 @@ mod tests {
             dependents: vec!["serde".to_string()],
             dependent_paths: vec![],
             test_versions: vec![],
-            baseline: None,
-            baseline_path: None,
             jobs: 1,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
