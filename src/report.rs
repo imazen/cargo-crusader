@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use crate::{TestResult, TestResultData, CompileResult, Error};
+use term::color::Color;
 
 #[derive(Default, Debug)]
 pub struct Summary {
@@ -39,11 +40,39 @@ pub fn summarize_results(results: &[TestResult]) -> Summary {
     sum
 }
 
+/// Get status label and color for a test result
+fn get_status_info(data: &TestResultData) -> (&'static str, Color) {
+    match data {
+        TestResultData::Passed(..) => ("✓ PASSED", term::color::BRIGHT_GREEN),
+        TestResultData::Regressed(..) => ("✗ REGRESSED", term::color::BRIGHT_RED),
+        TestResultData::Broken(..) => ("⚠ BROKEN", term::color::BRIGHT_YELLOW),
+        TestResultData::Skipped(..) => ("⊘ SKIPPED", term::color::BRIGHT_CYAN),
+        TestResultData::Error(..) => ("⚡ ERROR", term::color::BRIGHT_MAGENTA),
+    }
+}
+
+/// Print a colored table row
+fn print_colored_row(status: &str, name: &str, base_check: &str, base_test: &str,
+                     over_check: &str, over_test: &str, color: Color) {
+    // Print the row with coloring
+    let row = format!("│{:^12}│{:<28}│{:^13}│{:^12}│{:^13}│{:^13}│",
+                     status, name, base_check, base_test, over_check, over_test);
+
+    if let Some(ref mut t) = term::stdout() {
+        let _ = t.fg(color);
+        let _ = write!(t, "{}", row);
+        let _ = t.reset();
+        println!();
+    } else {
+        println!("{}", row);
+    }
+}
+
 /// Print a console table showing all test results
 pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_version: &str) {
-    println!("\n{}", "=".repeat(100));
+    println!("\n{}", "=".repeat(110));
     println!("Testing {} reverse dependencies of {} v{}", results.len(), crate_name, crate_version);
-    println!("{}", "=".repeat(100));
+    println!("{}", "=".repeat(110));
     println!();
 
     if results.is_empty() {
@@ -52,20 +81,22 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_versi
     }
 
     // Print table header
-    println!("┌{:─<30}┬{:─<15}┬{:─<14}┬{:─<15}┬{:─<15}┐",
-             "", "", "", "", "");
-    println!("│{:^30}│{:^15}│{:^14}│{:^15}│{:^15}│",
-             "Dependent", "Base Check", "Base Test", "Over Check", "Over Test");
-    println!("├{:─<30}┼{:─<15}┼{:─<14}┼{:─<15}┼{:─<15}┤",
-             "", "", "", "", "");
+    println!("┌{:─<12}┬{:─<28}┬{:─<13}┬{:─<12}┬{:─<13}┬{:─<13}┐",
+             "", "", "", "", "", "");
+    println!("│{:^12}│{:^28}│{:^13}│{:^12}│{:^13}│{:^13}│",
+             "Status", "Dependent", "Base Check", "Base Test", "Over Check", "Over Test");
+    println!("├{:─<12}┼{:─<28}┼{:─<13}┼{:─<12}┼{:─<13}┼{:─<13}┤",
+             "", "", "", "", "", "");
 
     // Print each result
     for result in results {
-        let name = if result.rev_dep.name.len() > 28 {
-            format!("{}...", &result.rev_dep.name[..25])
+        let name = if result.rev_dep.name.len() > 26 {
+            format!("{}...", &result.rev_dep.name[..23])
         } else {
             result.rev_dep.name.clone()
         };
+
+        let (status_label, color) = get_status_info(&result.data);
 
         match &result.data {
             TestResultData::Passed(four_step) => {
@@ -80,8 +111,8 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_versi
                     .map(format_step)
                     .unwrap_or_else(|| "(skipped)".to_string());
 
-                println!("│{:<30}│{:^15}│{:^14}│{:^15}│{:^15}│",
-                         name, base_check, base_test, over_check, over_test);
+                print_colored_row(status_label, &name, &base_check, &base_test,
+                                 &over_check, &over_test, color);
             }
             TestResultData::Regressed(four_step) => {
                 let base_check = format_step(&four_step.baseline_check);
@@ -95,8 +126,8 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_versi
                     .map(format_step)
                     .unwrap_or_else(|| "(skipped)".to_string());
 
-                println!("│{:<30}│{:^15}│{:^14}│{:^15}│{:^15}│",
-                         name, base_check, base_test, over_check, over_test);
+                print_colored_row(status_label, &name, &base_check, &base_test,
+                                 &over_check, &over_test, color);
             }
             TestResultData::Broken(four_step) => {
                 let base_check = format_step(&four_step.baseline_check);
@@ -104,22 +135,21 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_versi
                     .map(format_step)
                     .unwrap_or_else(|| "(skipped)".to_string());
 
-                println!("│{:<30}│{:^15}│{:^14}│{:^15}│{:^15}│",
-                         name, base_check, base_test, "(skipped)", "(skipped)");
+                print_colored_row(status_label, &name, &base_check, &base_test,
+                                 "(skipped)", "(skipped)", color);
             }
             TestResultData::Skipped(_) => {
-                println!("│{:<30}│{:^15}│{:^14}│{:^15}│{:^15}│",
-                         name, "SKIPPED", "(incompatible)", "", "");
+                print_colored_row(status_label, &name, "SKIPPED", "(incompatible)",
+                                 "", "", color);
             }
             TestResultData::Error(_) => {
-                println!("│{:<30}│{:^15}│{:^14}│{:^15}│{:^15}│",
-                         name, "ERROR", "", "", "");
+                print_colored_row(status_label, &name, "ERROR", "", "", "", color);
             }
         }
     }
 
-    println!("└{:─<30}┴{:─<15}┴{:─<14}┴{:─<15}┴{:─<15}┘",
-             "", "", "", "", "");
+    println!("└{:─<12}┴{:─<28}┴{:─<13}┴{:─<12}┴{:─<13}┴{:─<13}┘",
+             "", "", "", "", "", "");
     println!();
 
     // Print summary
