@@ -6,6 +6,7 @@ use std::env;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use log::debug;
+use crate::error_extract::{Diagnostic, parse_cargo_json};
 
 /// The type of compilation step being performed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,7 @@ pub struct CompileResult {
     pub stdout: String,
     pub stderr: String,
     pub duration: Duration,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl CompileResult {
@@ -67,10 +69,11 @@ pub fn compile_crate(
             .map_err(|e| format!("Failed to emit cargo override: {}", e))?;
     }
 
-    // Run the cargo command
+    // Run the cargo command with JSON output for better error extraction
     let start = Instant::now();
     let mut cmd = Command::new("cargo");
     cmd.arg(step.cargo_subcommand())
+        .arg("--message-format=json")
         .current_dir(crate_path);
 
     debug!("running cargo: {:?}", cmd);
@@ -82,12 +85,22 @@ pub fn compile_crate(
 
     debug!("result: {:?}, duration: {:?}", success, duration);
 
+    // Parse stdout for JSON messages (cargo writes JSON to stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // Parse diagnostics from JSON output
+    let diagnostics = parse_cargo_json(&stdout);
+
+    debug!("parsed {} diagnostics", diagnostics.len());
+
     Ok(CompileResult {
         step,
         success,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout,
+        stderr,
         duration,
+        diagnostics,
     })
 }
 
@@ -233,6 +246,7 @@ pub fn run_four_step_test(
             stdout: String::new(),
             stderr: "(skipped)".to_string(),
             duration: Duration::from_secs(0),
+            diagnostics: Vec::new(),
         }
     };
 
@@ -318,6 +332,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             duration: Duration::from_secs(1),
+            diagnostics: Vec::new(),
         };
         assert!(result.failed());
 
@@ -327,6 +342,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             duration: Duration::from_secs(1),
+            diagnostics: Vec::new(),
         };
         assert!(!result.failed());
     }
@@ -340,6 +356,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_secs(1),
+                diagnostics: Vec::new(),
             },
             baseline_test: None,
             override_check: None,
@@ -359,6 +376,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_secs(1),
+                diagnostics: Vec::new(),
             },
             baseline_test: Some(CompileResult {
                 step: CompileStep::Test,
@@ -366,6 +384,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_secs(2),
+                diagnostics: Vec::new(),
             }),
             override_check: Some(CompileResult {
                 step: CompileStep::Check,
@@ -373,6 +392,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_secs(1),
+                diagnostics: Vec::new(),
             }),
             override_test: Some(CompileResult {
                 step: CompileStep::Test,
@@ -380,6 +400,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_secs(2),
+                diagnostics: Vec::new(),
             }),
         };
         assert!(!passed.is_broken());
@@ -396,6 +417,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_secs(1),
+                diagnostics: Vec::new(),
             },
             baseline_test: Some(CompileResult {
                 step: CompileStep::Test,
@@ -403,6 +425,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_secs(2),
+                diagnostics: Vec::new(),
             }),
             override_check: Some(CompileResult {
                 step: CompileStep::Check,
@@ -410,6 +433,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_secs(1),
+                diagnostics: Vec::new(),
             }),
             override_test: None,
         };

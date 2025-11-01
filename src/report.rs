@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use crate::{TestResult, TestResultData, CompileResult, Error};
+use crate::error_extract::{Diagnostic, extract_error_summary};
 use term::color::Color;
 
 #[derive(Default, Debug)]
@@ -38,6 +39,119 @@ pub fn summarize_results(results: &[TestResult]) -> Summary {
     }
 
     sum
+}
+
+/// Print immediate failure details when a test fails
+pub fn print_immediate_failure(result: &TestResult) {
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    // Print header with colored status
+    if let Some(ref mut t) = term::stdout() {
+        let _ = t.fg(term::color::BRIGHT_RED);
+        let _ = t.attr(term::Attr::Bold);
+        let _ = write!(t, "FAILURE: ");
+        let _ = t.reset();
+        let _ = writeln!(t, "{} {}", result.rev_dep.name, result.rev_dep.vers);
+    } else {
+        println!("FAILURE: {} {}", result.rev_dep.name, result.rev_dep.vers);
+    }
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    match &result.data {
+        TestResultData::Regressed(four_step) => {
+            println!("\nStatus: REGRESSED (compiled with baseline, failed with WIP version)\n");
+
+            // Show which step failed
+            if let Some(ref check) = four_step.override_check {
+                if check.failed() {
+                    print_step_failure("Override Check", check);
+                }
+            }
+            if let Some(ref test) = four_step.override_test {
+                if test.failed() {
+                    print_step_failure("Override Test", test);
+                }
+            }
+        }
+        TestResultData::Broken(four_step) => {
+            println!("\nStatus: BROKEN (already fails with published baseline version)\n");
+
+            if four_step.baseline_check.failed() {
+                print_step_failure("Baseline Check", &four_step.baseline_check);
+            }
+            if let Some(ref test) = four_step.baseline_test {
+                if test.failed() {
+                    print_step_failure("Baseline Test", test);
+                }
+            }
+        }
+        TestResultData::Error(e) => {
+            println!("\nStatus: ERROR (internal crusader error)\n");
+            println!("{}", e);
+        }
+        _ => {}
+    }
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+}
+
+/// Print details of a failed compilation step
+fn print_step_failure(step_name: &str, result: &CompileResult) {
+    println!("▶ {} failed after {:.1}s", step_name, result.duration.as_secs_f64());
+    println!();
+
+    // If we have parsed diagnostics, show them
+    if !result.diagnostics.is_empty() {
+        let error_count = result.diagnostics.iter()
+            .filter(|d| d.level.is_error())
+            .count();
+
+        if error_count > 0 {
+            println!("Compilation errors ({} total):", error_count);
+            println!();
+
+            // Print each error's rendered output
+            for diag in result.diagnostics.iter().filter(|d| d.level.is_error()) {
+                println!("{}", diag.rendered.trim());
+                println!();
+            }
+        }
+    } else {
+        // Fallback: show stderr if no diagnostics available
+        if !result.stderr.is_empty() {
+            println!("Error output:");
+            println!();
+
+            // Show last 50 lines or all if less
+            let lines: Vec<&str> = result.stderr.lines().collect();
+            let start = if lines.len() > 50 {
+                println!("... (showing last 50 lines of output) ...");
+                println!();
+                lines.len() - 50
+            } else {
+                0
+            };
+
+            for line in &lines[start..] {
+                // Highlight error lines
+                if line.starts_with("error") || line.contains("error[E") {
+                    if let Some(ref mut t) = term::stdout() {
+                        let _ = t.fg(term::color::BRIGHT_RED);
+                        let _ = write!(t, "{}", line);
+                        let _ = t.reset();
+                        println!();
+                    } else {
+                        println!("{}", line);
+                    }
+                } else {
+                    println!("{}", line);
+                }
+            }
+        }
+    }
 }
 
 /// Get status label and color for a test result
@@ -423,6 +537,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             duration: Duration::from_secs(2),
+            diagnostics: Vec::new(),
         };
         assert_eq!(format_step(&success), "✓ 2.0s");
 
@@ -432,6 +547,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             duration: Duration::from_millis(1500),
+            diagnostics: Vec::new(),
         };
         assert_eq!(format_step(&failure), "✗ 1.5s");
     }

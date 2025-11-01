@@ -11,6 +11,7 @@
 mod api;
 mod cli;
 mod compile;
+mod error_extract;
 mod report;
 
 use semver::Version;
@@ -607,6 +608,7 @@ fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride) -> Result<Co
         stdout: (String::from_utf8(r.stdout)?),
         stderr: (String::from_utf8(r.stderr)?),
         duration,
+        diagnostics: Vec::new(), // Legacy path doesn't use JSON parsing
     })
 }
 
@@ -733,6 +735,11 @@ fn report_quick_result(current_num: usize, total: usize, result: &TestResult) {
         };
         print_color(&format!("{}", result.quick_str()), color);
         println!("");
+
+        // Print detailed error output immediately for failures
+        if matches!(result.data, TestResultData::Regressed(_) | TestResultData::Broken(_) | TestResultData::Error(_)) {
+            report::print_immediate_failure(result);
+        }
     });
 }
 
