@@ -11,6 +11,8 @@ use crate::error_extract::{Diagnostic, parse_cargo_json};
 /// The type of compilation step being performed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompileStep {
+    /// cargo fetch - download dependencies
+    Fetch,
     /// cargo check - fast compilation check without code generation
     Check,
     /// cargo test - full test suite execution
@@ -20,6 +22,7 @@ pub enum CompileStep {
 impl CompileStep {
     pub fn as_str(&self) -> &'static str {
         match self {
+            CompileStep::Fetch => "fetch",
             CompileStep::Check => "check",
             CompileStep::Test => "test",
         }
@@ -27,6 +30,7 @@ impl CompileStep {
 
     pub fn cargo_subcommand(&self) -> &'static str {
         match self {
+            CompileStep::Fetch => "fetch",
             CompileStep::Check => "check",
             CompileStep::Test => "test",
         }
