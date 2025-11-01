@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use crate::{TestResult, TestResultData, CompileResult, Error};
+use crate::compile::FourStepResult;
 use crate::error_extract::{Diagnostic, extract_error_summary};
 use term::color::Color;
 
@@ -166,11 +167,12 @@ fn get_status_info(data: &TestResultData) -> (&'static str, Color) {
 }
 
 /// Print a colored table row
-fn print_colored_row(status: &str, name: &str, base_check: &str, base_test: &str,
-                     over_check: &str, over_test: &str, color: Color) {
+fn print_colored_row(status: &str, name: &str, depends_on: &str, testing: &str,
+                     duration: &str, color: Color) {
     // Print the row with coloring
-    let row = format!("│{:^12}│{:<28}│{:^13}│{:^12}│{:^13}│{:^13}│",
-                     status, name, base_check, base_test, over_check, over_test);
+    // Status (12) | Dependent (26) | Depends On (18) | Testing (16) | Duration (10)
+    let row = format!("│{:^12}│{:<26}│{:<18}│{:<16}│{:>10}│",
+                     status, name, depends_on, testing, duration);
 
     if let Some(ref mut t) = term::stdout() {
         let _ = t.fg(color);
@@ -183,9 +185,10 @@ fn print_colored_row(status: &str, name: &str, base_check: &str, base_test: &str
 }
 
 /// Print a console table showing all test results
-pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_version: &str) {
+pub fn print_console_table(results: &[TestResult], crate_name: &str, display_version: &str) {
     println!("\n{}", "=".repeat(110));
-    println!("Testing {} reverse dependencies of {} v{}", results.len(), crate_name, crate_version);
+    println!("Testing {} reverse dependencies of {}", results.len(), crate_name);
+    println!("  this = {} (your work-in-progress version)", display_version);
     println!("{}", "=".repeat(110));
     println!();
 
@@ -194,76 +197,48 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_versi
         return;
     }
 
-    // Print table header
-    println!("┌{:─<12}┬{:─<28}┬{:─<13}┬{:─<12}┬{:─<13}┬{:─<13}┐",
-             "", "", "", "", "", "");
-    println!("│{:^12}│{:^28}│{:^13}│{:^12}│{:^13}│{:^13}│",
-             "Status", "Dependent", "Base Check", "Base Test", "Over Check", "Over Test");
-    println!("├{:─<12}┼{:─<28}┼{:─<13}┼{:─<12}┼{:─<13}┼{:─<13}┤",
-             "", "", "", "", "", "");
+    // Print table header with new columns
+    // Status (12) | Dependent (26) | Depends On (18) | Testing (16) | Duration (10)
+    println!("┌{:─<12}┬{:─<26}┬{:─<18}┬{:─<16}┬{:─<10}┐",
+             "", "", "", "", "");
+    println!("│{:^12}│{:^26}│{:^18}│{:^16}│{:^10}│",
+             "Status", "Dependent", "Depends On", "Testing", "Duration");
+    println!("├{:─<12}┼{:─<26}┼{:─<18}┼{:─<16}┼{:─<10}┤",
+             "", "", "", "", "");
 
     // Print each result
     for result in results {
-        let name = if result.rev_dep.name.len() > 26 {
-            format!("{}...", &result.rev_dep.name[..23])
+        // Format name with version: "crate-name 1.2.3"
+        let name_with_version = format!("{} {}", result.rev_dep.name, result.rev_dep.vers);
+        let name = if name_with_version.len() > 24 {
+            format!("{}...", &name_with_version[..21])
         } else {
-            result.rev_dep.name.clone()
+            name_with_version
         };
 
         let (status_label, color) = get_status_info(&result.data);
 
         match &result.data {
-            TestResultData::Passed(four_step) => {
-                let base_check = format_step(&four_step.baseline_check);
-                let base_test = four_step.baseline_test.as_ref()
-                    .map(format_step)
-                    .unwrap_or_else(|| "(skipped)".to_string());
-                let over_check = four_step.override_check.as_ref()
-                    .map(format_step)
-                    .unwrap_or_else(|| "(skipped)".to_string());
-                let over_test = four_step.override_test.as_ref()
-                    .map(format_step)
-                    .unwrap_or_else(|| "(skipped)".to_string());
-
-                print_colored_row(status_label, &name, &base_check, &base_test,
-                                 &over_check, &over_test, color);
-            }
-            TestResultData::Regressed(four_step) => {
-                let base_check = format_step(&four_step.baseline_check);
-                let base_test = four_step.baseline_test.as_ref()
-                    .map(format_step)
-                    .unwrap_or_else(|| "(skipped)".to_string());
-                let over_check = four_step.override_check.as_ref()
-                    .map(format_step)
-                    .unwrap_or_else(|| "(skipped)".to_string());
-                let over_test = four_step.override_test.as_ref()
-                    .map(format_step)
-                    .unwrap_or_else(|| "(skipped)".to_string());
-
-                print_colored_row(status_label, &name, &base_check, &base_test,
-                                 &over_check, &over_test, color);
-            }
+            TestResultData::Passed(four_step) |
+            TestResultData::Regressed(four_step) |
             TestResultData::Broken(four_step) => {
-                let base_check = format_step(&four_step.baseline_check);
-                let base_test = four_step.baseline_test.as_ref()
-                    .map(format_step)
-                    .unwrap_or_else(|| "(skipped)".to_string());
+                let depends_on = format_depends_on(&result.rev_dep.resolved_version, four_step);
+                let testing = format_testing(four_step);
+                let duration = format_total_duration(four_step);
 
-                print_colored_row(status_label, &name, &base_check, &base_test,
-                                 "(skipped)", "(skipped)", color);
+                print_colored_row(status_label, &name, &depends_on, &testing, &duration, color);
             }
             TestResultData::Skipped(_) => {
-                print_colored_row(status_label, &name, "SKIPPED", "(incompatible)",
-                                 "", "", color);
+                print_colored_row(status_label, &name, "(incompatible)", "", "", color);
             }
             TestResultData::Error(_) => {
-                print_colored_row(status_label, &name, "ERROR", "", "", "", color);
+                print_colored_row(status_label, &name, "ERROR", "", "", color);
             }
         }
     }
 
-    println!("└{:─<12}┴{:─<28}┴{:─<13}┴{:─<12}┴{:─<13}┴{:─<13}┘",
-             "", "", "", "", "", "");
+    println!("└{:─<12}┴{:─<26}┴{:─<18}┴{:─<16}┴{:─<10}┘",
+             "", "", "", "", "");
     println!();
 
     // Print summary
@@ -277,6 +252,44 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, crate_versi
     println!("  ━━━━━━━━━━━━━");
     println!("  Total:       {}", summary.total());
     println!();
+}
+
+/// Format the "Depends On" column showing baseline version with checkmarks
+fn format_depends_on(resolved_version: &Option<String>, four_step: &FourStepResult) -> String {
+    let version = resolved_version.as_deref().unwrap_or("?");
+    let check_mark = if four_step.baseline_check.success { "✓" } else { "✗" };
+    let test_mark = four_step.baseline_test.as_ref()
+        .map(|t| if t.success { "✓" } else { "✗" })
+        .unwrap_or(" ");
+
+    format!("{} {}{}", version, check_mark, test_mark)
+}
+
+/// Format the "Testing" column showing "this" with checkmarks
+fn format_testing(four_step: &FourStepResult) -> String {
+    let check_mark = four_step.override_check.as_ref()
+        .map(|c| if c.success { "✓" } else { "✗" })
+        .unwrap_or(" ");
+    let test_mark = four_step.override_test.as_ref()
+        .map(|t| if t.success { "✓" } else { "✗" })
+        .unwrap_or(" ");
+
+    format!("this {}{}", check_mark, test_mark)
+}
+
+/// Format total duration across all four steps
+fn format_total_duration(four_step: &FourStepResult) -> String {
+    let mut total = four_step.baseline_check.duration;
+    if let Some(ref t) = four_step.baseline_test {
+        total += t.duration;
+    }
+    if let Some(ref c) = four_step.override_check {
+        total += c.duration;
+    }
+    if let Some(ref t) = four_step.override_test {
+        total += t.duration;
+    }
+    format!("{:.1}s", total.as_secs_f64())
 }
 
 /// Format a compile step for console display

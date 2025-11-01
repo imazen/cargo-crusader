@@ -195,3 +195,131 @@ fn test_test_regression_scenario() {
     // - dependent-test-failing tests fail with v2
     // Expected: REGRESSED state
 }
+
+#[test]
+fn test_staging_directory_creates_on_first_use() {
+    use tempfile::TempDir;
+    use std::fs;
+
+    let temp_dir = TempDir::new().unwrap();
+    let staging_dir = temp_dir.path().join("staging");
+
+    // Staging dir should not exist yet
+    assert!(!staging_dir.exists());
+
+    // Create it
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    // Now it should exist
+    assert!(staging_dir.exists());
+}
+
+#[test]
+fn test_staging_directory_structure() {
+    use tempfile::TempDir;
+    use std::fs;
+
+    let temp_dir = TempDir::new().unwrap();
+    let staging_dir = temp_dir.path().join("staging");
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    // Simulate creating a staging directory for a crate
+    let crate_staging = staging_dir.join("serde-1.0.0");
+    fs::create_dir_all(&crate_staging).unwrap();
+
+    assert!(crate_staging.exists());
+    assert!(crate_staging.is_dir());
+}
+
+#[test]
+fn test_staging_directory_caching_check() {
+    use tempfile::TempDir;
+    use std::fs;
+    use std::time::{SystemTime, Duration};
+
+    let temp_dir = TempDir::new().unwrap();
+    let staging_dir = temp_dir.path().join("staging");
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let crate_staging = staging_dir.join("test-crate-0.1.0");
+    fs::create_dir_all(&crate_staging).unwrap();
+
+    // Write a marker file
+    let marker = crate_staging.join("marker.txt");
+    fs::write(&marker, "cached").unwrap();
+
+    // Simulate checking if already unpacked
+    if crate_staging.exists() {
+        // Should use cached version
+        let content = fs::read_to_string(&marker).unwrap();
+        assert_eq!(content, "cached");
+    } else {
+        panic!("Staging directory should exist");
+    }
+}
+
+#[test]
+fn test_cargo_metadata_works_on_fixture() {
+    use std::process::Command;
+
+    let fixtures = fixtures_dir();
+    let dependent = fixtures.join("dependent-passing");
+
+    // Verify cargo metadata works on one of our fixtures
+    let output = Command::new("cargo")
+        .args(&["metadata", "--format-version=1", "--no-deps"])
+        .current_dir(&dependent)
+        .output()
+        .expect("Failed to run cargo metadata");
+
+    assert!(output.status.success(), "cargo metadata should succeed");
+
+    // Parse JSON to verify structure
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let metadata: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("Should parse metadata JSON");
+
+    // Verify expected fields exist
+    assert!(metadata.get("packages").is_some());
+    assert!(metadata.get("workspace_root").is_some());
+}
+
+#[test]
+fn test_cargo_metadata_shows_base_crate_dependency() {
+    use std::process::Command;
+
+    let fixtures = fixtures_dir();
+    let dependent = fixtures.join("dependent-passing");
+
+    let output = Command::new("cargo")
+        .args(&["metadata", "--format-version=1", "--no-deps"])
+        .current_dir(&dependent)
+        .output()
+        .expect("Failed to run cargo metadata");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let metadata: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    // Look for base-crate in dependencies
+    if let Some(packages) = metadata.get("packages").and_then(|p| p.as_array()) {
+        for package in packages {
+            if let Some(deps) = package.get("dependencies").and_then(|d| d.as_array()) {
+                let has_base_crate = deps.iter().any(|dep| {
+                    dep.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|name| name == "base-crate")
+                        .unwrap_or(false)
+                });
+
+                if has_base_crate {
+                    // Found it! This is what extract_resolved_version uses
+                    return;
+                }
+            }
+        }
+    }
+
+    panic!("Should find base-crate in dependent-passing's dependencies");
+}

@@ -55,7 +55,7 @@ fn main() {
     }
 
     // Get config
-    let config = match get_config() {
+    let config = match get_config(&args) {
         Ok(c) => c,
         Err(e) => {
             report_error(e);
@@ -124,9 +124,25 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
 struct Config {
     crate_name: String,
     version: String,
+    git_hash: Option<String>,
+    is_dirty: bool,
+    staging_dir: PathBuf,
     base_override: CrateOverride,
     next_override: CrateOverride,
     limit: Option<usize>,
+}
+
+impl Config {
+    /// Get formatted version string for display
+    /// Examples: "1.0.0 abc123f*", "1.0.0 abc123f", "1.0.0*", "1.0.0"
+    fn display_version(&self) -> String {
+        match (&self.git_hash, self.is_dirty) {
+            (Some(hash), true) => format!("{} {}*", self.version, hash),
+            (Some(hash), false) => format!("{} {}", self.version, hash),
+            (None, true) => format!("{}*", self.version),
+            (None, false) => self.version.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -135,10 +151,42 @@ enum CrateOverride {
     Source(PathBuf)
 }
 
-fn get_config() -> Result<Config, Error> {
-    let manifest = env::var("CRUSADER_MANIFEST");
-    let manifest = manifest.unwrap_or_else(|_| "./Cargo.toml".to_string());
-    let manifest = PathBuf::from(manifest);
+/// Get short git hash (7 chars) if in a git repository
+fn get_git_hash() -> Option<String> {
+    Command::new("git")
+        .args(&["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|s| s.trim().to_string())
+}
+
+/// Check if git working directory is dirty (has uncommitted changes)
+fn is_git_dirty() -> bool {
+    Command::new("git")
+        .args(&["status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn get_config(args: &cli::CliArgs) -> Result<Config, Error> {
+    // Priority: CLI arg > env var > default
+    let manifest = if let Some(ref path) = args.manifest_path {
+        // If path is a directory, look for Cargo.toml inside it
+        if path.is_dir() {
+            path.join("Cargo.toml")
+        } else {
+            path.clone()
+        }
+    } else {
+        let env_manifest = env::var("CRUSADER_MANIFEST");
+        PathBuf::from(env_manifest.unwrap_or_else(|_| "./Cargo.toml".to_string()))
+    };
     debug!("Using manifest {:?}", manifest);
 
     let limit = env::var("CRUSADER_LIMIT")
@@ -146,9 +194,17 @@ fn get_config() -> Result<Config, Error> {
         .and_then(|s| s.parse::<usize>().ok());
 
     let (crate_name, version) = get_crate_info(&manifest)?;
+
+    // Get git information for display
+    let git_hash = get_git_hash();
+    let is_dirty = git_hash.is_none() || is_git_dirty();
+
     Ok(Config {
         crate_name,
         version,
+        git_hash,
+        is_dirty,
+        staging_dir: args.staging_dir.clone(),
         base_override: CrateOverride::Default,
         next_override: CrateOverride::Source(manifest),
         limit,
@@ -247,7 +303,8 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>, Error> {
 #[derive(Debug, Clone)]
 struct RevDep {
     name: RevDepName,
-    vers: Version
+    vers: Version,
+    resolved_version: Option<String>, // Exact version from dependent's Cargo.lock
 }
 
 #[derive(Debug)]
@@ -376,7 +433,8 @@ impl TestResultReceiver {
             Err(e) => {
                 let r = RevDep {
                     name: self.rev_dep,
-                    vers: Version::parse("0.0.0").unwrap()
+                    vers: Version::parse("0.0.0").unwrap(),
+                    resolved_version: None,
                 };
                 TestResult::error(r, Error::from(e))
             }
@@ -407,21 +465,130 @@ fn run_test(pool: &mut ThreadPool,
     return result_rx;
 }
 
+/// Extract the resolved version of a dependency using cargo metadata
+/// Caches unpacked crates in staging_dir for reuse across runs
+fn extract_resolved_version(rev_dep: &RevDep, crate_name: &str, staging_dir: &Path) -> Result<String, Error> {
+    // Create staging directory if it doesn't exist
+    fs::create_dir_all(staging_dir)?;
+
+    // Staging path: staging_dir/{crate-name}-{version}/
+    let staging_path = staging_dir.join(format!("{}-{}", rev_dep.name, rev_dep.vers));
+
+    // Check if already unpacked
+    if !staging_path.exists() {
+        debug!("Unpacking {} to staging dir", rev_dep.name);
+        let crate_handle = get_crate_handle(rev_dep)?;
+        fs::create_dir_all(&staging_path)?;
+        crate_handle.unpack_source_to(&staging_path)?;
+    } else {
+        debug!("Using cached staging dir for {}", rev_dep.name);
+    }
+
+    // The crate is unpacked directly into staging_path (--strip-components=1)
+    let crate_dir = &staging_path;
+
+    // Verify Cargo.toml exists
+    if crate_dir.join("Cargo.toml").exists() {
+
+        // Run cargo metadata to get resolved dependencies
+        let output = Command::new("cargo")
+            .args(&["metadata", "--format-version=1"])
+            .current_dir(&crate_dir)
+            .output()?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            debug!("cargo metadata output length: {} bytes", stdout.len());
+
+            // Parse JSON metadata
+            if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                debug!("Successfully parsed metadata JSON");
+                // Look through resolve.nodes for our dependency
+                if let Some(resolve) = metadata.get("resolve") {
+                    if let Some(nodes) = resolve.get("nodes").and_then(|n| n.as_array()) {
+                        for node in nodes {
+                            if let Some(deps) = node.get("deps").and_then(|d| d.as_array()) {
+                                for dep in deps {
+                                    if let Some(name) = dep.get("name").and_then(|n| n.as_str()) {
+                                        if name == crate_name {
+                                            if let Some(pkg) = dep.get("pkg").and_then(|p| p.as_str()) {
+                                                // pkg format: "crate-name version (registry+...)"
+                                                // Extract version from between name and parenthesis
+                                                let parts: Vec<&str> = pkg.split_whitespace().collect();
+                                                if parts.len() >= 2 {
+                                                    return Ok(parts[1].to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: check packages array for version requirement
+                if let Some(packages) = metadata.get("packages").and_then(|p| p.as_array()) {
+                    debug!("Checking {} packages for {}", packages.len(), crate_name);
+                    for package in packages {
+                        if let Some(pkg_name) = package.get("name").and_then(|n| n.as_str()) {
+                            debug!("Checking package: {}", pkg_name);
+                        }
+                        if let Some(deps) = package.get("dependencies").and_then(|d| d.as_array()) {
+                            for dep in deps {
+                                if let Some(name) = dep.get("name").and_then(|n| n.as_str()) {
+                                    if name == crate_name {
+                                        debug!("Found {} in dependencies!", crate_name);
+                                        if let Some(req) = dep.get("req").and_then(|r| r.as_str()) {
+                                            debug!("Version requirement: {}", req);
+                                            return Ok(req.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                debug!("Could not find {} in metadata", crate_name);
+            }
+        } else {
+            debug!("cargo metadata failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+    } else {
+        debug!("Cargo.toml not found in {}", crate_dir.display());
+    }
+
+    Err(Error::ProcessError("Failed to extract resolved version via cargo metadata".to_string()))
+}
+
 fn run_test_local(config: &Config, rev_dep: RevDepName) -> TestResult {
 
     status(&format!("testing crate {}", rev_dep));
 
     // First, figure get the most recent version number
-    let rev_dep = match resolve_rev_dep_version(rev_dep.clone()) {
+    let mut rev_dep = match resolve_rev_dep_version(rev_dep.clone()) {
         Ok(r) => r,
         Err(e) => {
             let rev_dep = RevDep {
                 name: rev_dep,
-                vers: Version::parse("0.0.0").unwrap()
+                vers: Version::parse("0.0.0").unwrap(),
+                resolved_version: None,
             };
             return TestResult::error(rev_dep, e);
         }
     };
+
+    // Extract the resolved version from the dependent's Cargo.lock
+    match extract_resolved_version(&rev_dep, &config.crate_name, &config.staging_dir) {
+        Ok(resolved) => {
+            debug!("Resolved version for {} -> {}: {}", rev_dep.name, config.crate_name, resolved);
+            rev_dep.resolved_version = Some(resolved);
+        }
+        Err(e) => {
+            debug!("Failed to extract resolved version for {}: {}", rev_dep.name, e);
+        }
+    }
 
     // Check if the dependent's version requirement is compatible with our WIP version
     match check_version_compatibility(&rev_dep, &config) {
@@ -442,7 +609,7 @@ fn run_test_local(config: &Config, rev_dep: RevDepName) -> TestResult {
         }
     }
 
-    let base_result = match compile_with_custom_dep(&rev_dep, &config.base_override) {
+    let base_result = match compile_with_custom_dep(&rev_dep, &config.base_override, &config.staging_dir) {
         Ok(r) => r,
         Err(e) => return TestResult::error(rev_dep, e)
     };
@@ -450,7 +617,7 @@ fn run_test_local(config: &Config, rev_dep: RevDepName) -> TestResult {
     if base_result.failed() {
         return TestResult::broken(rev_dep, base_result);
     }
-    let next_result = match compile_with_custom_dep(&rev_dep, &config.next_override) {
+    let next_result = match compile_with_custom_dep(&rev_dep, &config.next_override, &config.staging_dir) {
         Ok(r) => r,
         Err(e) => return TestResult::error(rev_dep, e)
     };
@@ -562,7 +729,8 @@ fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
     versions.pop().map(|v| {
         RevDep {
             name: name,
-            vers: v
+            vers: v,
+            resolved_version: None,
         }
     }).ok_or(Error::NoCrateVersions)
 }
@@ -571,15 +739,31 @@ fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
 // CompileResult is now in compile module
 type CompileResult = compile::CompileResult;
 
-fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride) -> Result<CompileResult, Error> {
-    let ref crate_handle = get_crate_handle(rev_dep)?;
-    let temp_dir = TempDir::new()?;
-    let ref source_dir = temp_dir.path().join("source");
-    (fs::create_dir(source_dir)?);
-    (crate_handle.unpack_source_to(source_dir)?);
+fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride, staging_dir: &Path) -> Result<CompileResult, Error> {
+    // Use staging directory instead of temp dir to cache build artifacts
+    fs::create_dir_all(staging_dir)?;
+    let staging_path = staging_dir.join(format!("{}-{}", rev_dep.name, rev_dep.vers));
+
+    // Check if already unpacked, if not unpack it
+    if !staging_path.exists() {
+        debug!("Unpacking {} to staging for compilation", rev_dep.name);
+        let crate_handle = get_crate_handle(rev_dep)?;
+        fs::create_dir_all(&staging_path)?;
+        crate_handle.unpack_source_to(&staging_path)?;
+    } else {
+        debug!("Using cached staging dir for compilation of {}", rev_dep.name);
+    }
+
+    let ref source_dir = staging_path;
 
     match *krate {
-        CrateOverride::Default => (),
+        CrateOverride::Default => {
+            // Clean up any existing .cargo/config from previous runs
+            let cargo_dir = source_dir.join(".cargo");
+            if cargo_dir.exists() {
+                fs::remove_dir_all(&cargo_dir).ok(); // Ignore errors
+            }
+        },
         CrateOverride::Source(ref path) => {
             // Emit a .cargo/config file to override the project's
             // dependency on *our* project with the WIP.
@@ -588,7 +772,7 @@ fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride) -> Result<Co
     }
 
     // NB: The way cargo searches for .cargo/config, which we use to
-    // override dependencies, depends on the CWD, and is not affacted
+    // override dependencies, depends on the CWD, and is not affected
     // by the --manifest-path flag, so this is changing directories.
     let start = std::time::Instant::now();
     let mut cmd = Command::new("cargo");
@@ -747,7 +931,7 @@ fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, conf
     match res {
         Ok(results) => {
             // Print console table
-            report::print_console_table(&results, &config.crate_name, &config.version);
+            report::print_console_table(&results, &config.crate_name, &config.display_version());
 
             // Generate markdown analysis report
             let markdown_path = args.output.with_extension("").with_extension("md")

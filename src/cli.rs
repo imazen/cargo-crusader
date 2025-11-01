@@ -6,6 +6,10 @@ use std::path::PathBuf;
 #[command(about = "Test the downstream impact of crate changes before publishing")]
 #[command(version)]
 pub struct CliArgs {
+    /// Path to the crate to test (directory or Cargo.toml file)
+    #[arg(long, short = 'p', value_name = "PATH")]
+    pub manifest_path: Option<PathBuf>,
+
     /// Test top N reverse dependencies by download count
     #[arg(long, default_value = "5")]
     pub top_dependents: usize,
@@ -33,6 +37,10 @@ pub struct CliArgs {
     /// HTML report output path
     #[arg(long, default_value = "crusader-report.html")]
     pub output: PathBuf,
+
+    /// Directory for staging unpacked crates (enables caching across runs)
+    #[arg(long, default_value = ".crusader/staging")]
+    pub staging_dir: PathBuf,
 
     /// Skip cargo check (only run tests)
     #[arg(long)]
@@ -99,6 +107,7 @@ mod tests {
     #[test]
     fn test_validate_both_no_flags_fails() {
         let args = CliArgs {
+            manifest_path: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
@@ -106,6 +115,7 @@ mod tests {
             baseline_path: None,
             jobs: 1,
             output: PathBuf::from("report.html"),
+            staging_dir: PathBuf::from(".crusader/staging"),
             no_check: true,
             no_test: true,
             keep_tmp: false,
@@ -117,6 +127,7 @@ mod tests {
     #[test]
     fn test_validate_both_baseline_options_fails() {
         let args = CliArgs {
+            manifest_path: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
@@ -124,6 +135,7 @@ mod tests {
             baseline_path: Some(PathBuf::from("/tmp/baseline")),
             jobs: 1,
             output: PathBuf::from("report.html"),
+            staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
             keep_tmp: false,
@@ -135,6 +147,7 @@ mod tests {
     #[test]
     fn test_validate_zero_jobs_fails() {
         let args = CliArgs {
+            manifest_path: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
@@ -142,6 +155,7 @@ mod tests {
             baseline_path: None,
             jobs: 0,
             output: PathBuf::from("report.html"),
+            staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
             keep_tmp: false,
@@ -153,6 +167,7 @@ mod tests {
     #[test]
     fn test_validate_valid_config_succeeds() {
         let args = CliArgs {
+            manifest_path: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
@@ -160,6 +175,7 @@ mod tests {
             baseline_path: None,
             jobs: 1,
             output: PathBuf::from("report.html"),
+            staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
             keep_tmp: false,
@@ -171,6 +187,7 @@ mod tests {
     #[test]
     fn test_is_offline_mode() {
         let args = CliArgs {
+            manifest_path: None,
             top_dependents: 0,
             dependents: vec![],
             dependent_paths: vec![PathBuf::from("/tmp/crate")],
@@ -178,6 +195,7 @@ mod tests {
             baseline_path: None,
             jobs: 1,
             output: PathBuf::from("report.html"),
+            staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
             keep_tmp: false,
@@ -189,6 +207,7 @@ mod tests {
     #[test]
     fn test_not_offline_mode_with_dependents() {
         let args = CliArgs {
+            manifest_path: None,
             top_dependents: 0,
             dependents: vec!["serde".to_string()],
             dependent_paths: vec![],
@@ -196,6 +215,7 @@ mod tests {
             baseline_path: None,
             jobs: 1,
             output: PathBuf::from("report.html"),
+            staging_dir: PathBuf::from(".crusader/staging"),
             no_check: false,
             no_test: false,
             keep_tmp: false,
