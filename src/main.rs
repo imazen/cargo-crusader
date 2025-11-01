@@ -941,7 +941,8 @@ fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, conf
                 .map(|f| PathBuf::from(format!("{}.md", f)))
                 .unwrap_or_else(|| PathBuf::from("crusader-analysis.md"));
 
-            match report::export_markdown_report(&results, &markdown_path, &config.crate_name, &config.version) {
+            let display_version = config.display_version();
+            match report::export_markdown_report(&results, &markdown_path, &config.crate_name, &display_version) {
                 Ok(_) => {
                     println!("Markdown report: {}", markdown_path.display());
                 }
@@ -951,7 +952,7 @@ fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, conf
             }
 
             // Generate HTML report
-            match report::export_html_report(results, &args.output) {
+            match report::export_html_report(results, &args.output, &config.crate_name, &display_version) {
                 Ok(summary) => {
                     println!("HTML report: {}", args.output.display());
                     println!();

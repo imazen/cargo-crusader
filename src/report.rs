@@ -304,7 +304,7 @@ pub fn export_markdown_report(
     results: &[TestResult],
     output_path: &PathBuf,
     crate_name: &str,
-    crate_version: &str,
+    display_version: &str,
 ) -> Result<Summary, Error> {
     let summary = summarize_results(results);
 
@@ -312,7 +312,7 @@ pub fn export_markdown_report(
 
     // Title and summary
     writeln!(file, "# Cargo Crusader Analysis Report\n")?;
-    writeln!(file, "**Crate**: {} v{}\n", crate_name, crate_version)?;
+    writeln!(file, "**Testing**: {} {}\n", crate_name, display_version)?;
 
     writeln!(file, "## Summary Statistics\n")?;
     writeln!(file, "| Status | Count |")?;
@@ -398,7 +398,12 @@ pub fn export_markdown_report(
 fn export_regression_markdown(file: &mut File, result: &TestResult) -> Result<(), Error> {
     writeln!(file, "### {} v{}\n", result.rev_dep.name, result.rev_dep.vers)?;
     writeln!(file, "**Status**: ❌ REGRESSED")?;
-    writeln!(file, "**Crates.io**: https://crates.io/crates/{}\n", result.rev_dep.name)?;
+    writeln!(file, "**Crates.io**: https://crates.io/crates/{}", result.rev_dep.name)?;
+    if let Some(ref resolved) = result.rev_dep.resolved_version {
+        writeln!(file, "**Depends On**: {}\n", resolved)?;
+    } else {
+        writeln!(file)?;
+    }
 
     if let TestResultData::Regressed(four_step) = &result.data {
         // Show step results
@@ -496,7 +501,12 @@ fn export_regression_markdown(file: &mut File, result: &TestResult) -> Result<()
 fn export_broken_markdown(file: &mut File, result: &TestResult) -> Result<(), Error> {
     writeln!(file, "### {} v{}\n", result.rev_dep.name, result.rev_dep.vers)?;
     writeln!(file, "**Status**: ⚠️ BROKEN (pre-existing)")?;
-    writeln!(file, "**Crates.io**: https://crates.io/crates/{}\n", result.rev_dep.name)?;
+    writeln!(file, "**Crates.io**: https://crates.io/crates/{}", result.rev_dep.name)?;
+    if let Some(ref resolved) = result.rev_dep.resolved_version {
+        writeln!(file, "**Depends On**: {}\n", resolved)?;
+    } else {
+        writeln!(file)?;
+    }
 
     if let TestResultData::Broken(four_step) = &result.data {
         let failed_step = if four_step.baseline_check.failed() {
@@ -527,6 +537,8 @@ fn export_broken_markdown(file: &mut File, result: &TestResult) -> Result<(), Er
 pub fn export_html_report(
     mut results: Vec<TestResult>,
     output_path: &PathBuf,
+    crate_name: &str,
+    display_version: &str,
 ) -> Result<Summary, Error> {
     let summary = summarize_results(&results);
 
@@ -573,6 +585,7 @@ h3 { margin-top: 15px; color: #333; }
 
     writeln!(file, "<body>")?;
     writeln!(file, "<h1>Cargo Crusader Report</h1>")?;
+    writeln!(file, "<p><strong>Testing:</strong> {} {}</p>", sanitize(crate_name), sanitize(display_version))?;
 
     // Summary statistics
     writeln!(file, "<div class='summary-stats'>")?;
@@ -608,7 +621,7 @@ h3 { margin-top: 15px; color: #333; }
     writeln!(file, "<table>")?;
     writeln!(
         file,
-        "<tr><th>Crate</th><th>Version</th><th>Result</th></tr>"
+        "<tr><th>Crate</th><th>Version</th><th>Depends On</th><th>Result</th></tr>"
     )?;
     for result in &results {
         writeln!(file, "<tr>")?;
@@ -618,6 +631,8 @@ h3 { margin-top: 15px; color: #333; }
         writeln!(file, "</a>")?;
         writeln!(file, "</td>")?;
         writeln!(file, "<td>{}</td>", result.rev_dep.vers)?;
+        let depends_on = result.rev_dep.resolved_version.as_deref().unwrap_or("?");
+        writeln!(file, "<td>{}</td>", sanitize(depends_on))?;
         writeln!(
             file,
             "<td class='{}'>{}</td>",
