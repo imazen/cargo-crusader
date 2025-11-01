@@ -8,19 +8,25 @@ use std::path::PathBuf;
 pub struct CliArgs {
     /// Path to the crate to test (directory or Cargo.toml file)
     #[arg(long, short = 'p', value_name = "PATH")]
-    pub manifest_path: Option<PathBuf>,
+    pub path: Option<PathBuf>,
 
     /// Test top N reverse dependencies by download count
     #[arg(long, default_value = "5")]
     pub top_dependents: usize,
 
-    /// Explicitly test these crates from crates.io
-    #[arg(long, value_name = "CRATE")]
+    /// Explicitly test these crates from crates.io (supports "name:version" syntax)
+    /// Examples: "image", "image:0.25.8"
+    #[arg(long, value_name = "CRATE[:VERSION]")]
     pub dependents: Vec<String>,
 
     /// Test local crates at these paths
     #[arg(long, value_name = "PATH")]
     pub dependent_paths: Vec<PathBuf>,
+
+    /// Test against specific versions of the base crate (e.g., "0.3.0 4.1.1")
+    /// When specified with --path, includes "this" (WIP version) automatically
+    #[arg(long, value_name = "VERSION")]
+    pub test_versions: Vec<String>,
 
     /// Git reference for baseline (tag/commit/branch)
     #[arg(long, value_name = "REF")]
@@ -107,10 +113,11 @@ mod tests {
     #[test]
     fn test_validate_both_no_flags_fails() {
         let args = CliArgs {
-            manifest_path: None,
+            path: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
+            test_versions: vec![],
             baseline: None,
             baseline_path: None,
             jobs: 1,
@@ -127,10 +134,11 @@ mod tests {
     #[test]
     fn test_validate_both_baseline_options_fails() {
         let args = CliArgs {
-            manifest_path: None,
+            path: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
+            test_versions: vec![],
             baseline: Some("v1.0.0".to_string()),
             baseline_path: Some(PathBuf::from("/tmp/baseline")),
             jobs: 1,
@@ -147,10 +155,11 @@ mod tests {
     #[test]
     fn test_validate_zero_jobs_fails() {
         let args = CliArgs {
-            manifest_path: None,
+            path: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
+            test_versions: vec![],
             baseline: None,
             baseline_path: None,
             jobs: 0,
@@ -167,10 +176,11 @@ mod tests {
     #[test]
     fn test_validate_valid_config_succeeds() {
         let args = CliArgs {
-            manifest_path: None,
+            path: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
+            test_versions: vec![],
             baseline: None,
             baseline_path: None,
             jobs: 1,
@@ -187,10 +197,11 @@ mod tests {
     #[test]
     fn test_is_offline_mode() {
         let args = CliArgs {
-            manifest_path: None,
+            path: None,
             top_dependents: 0,
             dependents: vec![],
             dependent_paths: vec![PathBuf::from("/tmp/crate")],
+            test_versions: vec![],
             baseline: None,
             baseline_path: None,
             jobs: 1,
@@ -207,10 +218,11 @@ mod tests {
     #[test]
     fn test_not_offline_mode_with_dependents() {
         let args = CliArgs {
-            manifest_path: None,
+            path: None,
             top_dependents: 0,
             dependents: vec!["serde".to_string()],
             dependent_paths: vec![],
+            test_versions: vec![],
             baseline: None,
             baseline_path: None,
             jobs: 1,

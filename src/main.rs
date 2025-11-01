@@ -68,28 +68,38 @@ fn main() {
     report_results(results, &args, &config);
 }
 
+/// Parse dependent spec in "name" or "name:version" format
+fn parse_dependent_spec(spec: &str) -> (String, Option<String>) {
+    match spec.split_once(':') {
+        Some((name, version)) => (name.to_string(), Some(version.to_string())),
+        None => (spec.to_string(), None),
+    }
+}
+
 fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
 
-    // Determine which dependents to test
-    let rev_deps = if !args.dependent_paths.is_empty() {
-        // Local paths mode - convert to rev dep names
+    // Determine which dependents to test (returns Vec<(name, optional_version)>)
+    let rev_deps: Vec<(RevDepName, Option<String>)> = if !args.dependent_paths.is_empty() {
+        // Local paths mode - convert to rev dep names (no version spec)
         args.dependent_paths
             .iter()
             .map(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
+                    .map(|s| (s.to_string(), None))
                     .ok_or_else(|| Error::InvalidPath(p.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?
     } else if !args.dependents.is_empty() {
-        // Explicit crate names from crates.io
-        args.dependents.clone()
+        // Explicit crate names from crates.io (parse name:version syntax)
+        args.dependents.iter()
+            .map(|spec| parse_dependent_spec(spec))
+            .collect()
     } else {
-        // Top N by downloads
+        // Top N by downloads (no version spec)
         let api_deps = api::get_top_dependents(&config.crate_name, args.top_dependents)
             .map_err(|e| Error::CratesIoApiError(e))?;
-        api_deps.into_iter().map(|d| d.name).collect()
+        api_deps.into_iter().map(|d| (d.name, None)).collect()
     };
 
     status(&format!(
@@ -103,8 +113,8 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     // receivers.
     let mut result_rxs = Vec::new();
     let ref mut pool = ThreadPool::new(args.jobs);
-    for rev_dep in rev_deps {
-        let result = run_test(pool, config.clone(), rev_dep);
+    for (rev_dep, version) in rev_deps {
+        let result = run_test(pool, config.clone(), rev_dep, version);
         result_rxs.push(result);
     }
 
@@ -176,7 +186,7 @@ fn is_git_dirty() -> bool {
 
 fn get_config(args: &cli::CliArgs) -> Result<Config, Error> {
     // Priority: CLI arg > env var > default
-    let manifest = if let Some(ref path) = args.manifest_path {
+    let manifest = if let Some(ref path) = args.path {
         // If path is a directory, look for Cargo.toml inside it
         if path.is_dir() {
             path.join("Cargo.toml")
@@ -455,10 +465,11 @@ fn new_result_receiver(rev_dep: RevDepName) -> (Sender<TestResult>, TestResultRe
 
 fn run_test(pool: &mut ThreadPool,
             config: Config,
-            rev_dep: RevDepName) -> TestResultReceiver {
+            rev_dep: RevDepName,
+            version: Option<String>) -> TestResultReceiver {
     let (result_tx, result_rx) = new_result_receiver(rev_dep.clone());
     pool.execute(move || {
-        let res = run_test_local(&config, rev_dep);
+        let res = run_test_local(&config, rev_dep, version);
         result_tx.send(res).unwrap();
     });
 
@@ -562,12 +573,12 @@ fn extract_resolved_version(rev_dep: &RevDep, crate_name: &str, staging_dir: &Pa
     Err(Error::ProcessError("Failed to extract resolved version via cargo metadata".to_string()))
 }
 
-fn run_test_local(config: &Config, rev_dep: RevDepName) -> TestResult {
+fn run_test_local(config: &Config, rev_dep: RevDepName, version: Option<String>) -> TestResult {
 
     status(&format!("testing crate {}", rev_dep));
 
-    // First, figure get the most recent version number
-    let mut rev_dep = match resolve_rev_dep_version(rev_dep.clone()) {
+    // First, figure get the most recent version number (or use provided version)
+    let mut rev_dep = match resolve_rev_dep_version(rev_dep.clone(), version) {
         Ok(r) => r,
         Err(e) => {
             let rev_dep = RevDep {
@@ -714,7 +725,20 @@ fn check_requirement(req: &toml::Value, wip_version: &Version) -> Result<bool, E
     Ok(version_req.matches(wip_version))
 }
 
-fn resolve_rev_dep_version(name: RevDepName) -> Result<RevDep, Error> {
+fn resolve_rev_dep_version(name: RevDepName, version: Option<String>) -> Result<RevDep, Error> {
+    // If version is provided, use it directly
+    if let Some(ver_str) = version {
+        debug!("using pinned version {} for {}", ver_str, name);
+        let vers = Version::parse(&ver_str)
+            .map_err(|e| Error::SemverError(e))?;
+        return Ok(RevDep {
+            name: name,
+            vers: vers,
+            resolved_version: None,
+        });
+    }
+
+    // Otherwise, resolve latest version from crates.io
     debug!("resolving current version for {}", name);
 
     let krate = CRATES_IO_CLIENT.get_crate(&name)
