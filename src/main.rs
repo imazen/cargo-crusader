@@ -77,6 +77,71 @@ fn parse_dependent_spec(spec: &str) -> (String, Option<String>) {
 }
 
 fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
+    // Phase 5: Check if we're doing multi-version testing
+    let use_multi_version = !args.test_versions.is_empty();
+
+    // Build list of versions to test (Phase 5)
+    let test_versions: Option<Vec<compile::VersionSource>> = if use_multi_version {
+        let mut versions = Vec::new();
+
+        // Add specified versions from --test-versions, resolving keywords
+        for ver_str in &args.test_versions {
+            let version_source = match ver_str.as_str() {
+                "latest" => {
+                    // Resolve to latest stable version
+                    match resolve_latest_version(&config.crate_name, false) {
+                        Ok(ver) => {
+                            debug!("Resolved 'latest' to {}", ver);
+                            compile::VersionSource::Published(ver)
+                        }
+                        Err(e) => {
+                            status(&format!("Warning: Failed to resolve 'latest': {}", e));
+                            continue;
+                        }
+                    }
+                }
+                "latest-preview" | "latest-prerelease" => {
+                    // Resolve to latest version including pre-releases
+                    match resolve_latest_version(&config.crate_name, true) {
+                        Ok(ver) => {
+                            debug!("Resolved 'latest-preview' to {}", ver);
+                            compile::VersionSource::Published(ver)
+                        }
+                        Err(e) => {
+                            status(&format!("Warning: Failed to resolve 'latest-preview': {}", e));
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    // Literal version string (supports hyphens like "0.8.2-alpha2")
+                    compile::VersionSource::Published(ver_str.clone())
+                }
+            };
+            versions.push(version_source);
+        }
+
+        // Add "this" (local WIP) or "latest" if no local version
+        if let CrateOverride::Source(ref manifest_path) = config.next_override {
+            debug!("Adding 'this' version from {:?}", manifest_path);
+            versions.push(compile::VersionSource::Local(manifest_path.clone()));
+        } else {
+            // No local version (only --crate), add "latest" as final version
+            match resolve_latest_version(&config.crate_name, false) {
+                Ok(ver) => {
+                    debug!("No local version, adding latest: {}", ver);
+                    versions.push(compile::VersionSource::Published(ver));
+                }
+                Err(e) => {
+                    status(&format!("Warning: Failed to resolve latest version: {}", e));
+                }
+            }
+        }
+
+        Some(versions)
+    } else {
+        None
+    };
 
     // Determine which dependents to test (returns Vec<(name, optional_version)>)
     let rev_deps: Vec<(RevDepName, Option<String>)> = if !args.dependent_paths.is_empty() {
@@ -114,7 +179,13 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     let mut result_rxs = Vec::new();
     let ref mut pool = ThreadPool::new(args.jobs);
     for (rev_dep, version) in rev_deps {
-        let result = run_test(pool, config.clone(), rev_dep, version);
+        let result = if let Some(ref versions) = test_versions {
+            // Phase 5: Multi-version testing
+            run_test_multi_version(pool, config.clone(), rev_dep, version, versions.clone())
+        } else {
+            // Legacy: Single baseline vs override test
+            run_test(pool, config.clone(), rev_dep, version)
+        };
         result_rxs.push(result);
     }
 
@@ -185,27 +256,75 @@ fn is_git_dirty() -> bool {
 }
 
 fn get_config(args: &cli::CliArgs) -> Result<Config, Error> {
-    // Priority: CLI arg > env var > default
-    let manifest = if let Some(ref path) = args.path {
-        // If path is a directory, look for Cargo.toml inside it
-        if path.is_dir() {
-            path.join("Cargo.toml")
-        } else {
-            path.clone()
-        }
-    } else {
-        let env_manifest = env::var("CRUSADER_MANIFEST");
-        PathBuf::from(env_manifest.unwrap_or_else(|_| "./Cargo.toml".to_string()))
-    };
-    debug!("Using manifest {:?}", manifest);
-
     let limit = env::var("CRUSADER_LIMIT")
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
 
-    let (crate_name, version) = get_crate_info(&manifest)?;
+    // Determine crate name and version based on --crate and --path
+    let (crate_name, version, next_override) = if let Some(ref crate_name) = args.crate_name {
+        // --crate specified: use that name
+        debug!("Using crate name from --crate: {}", crate_name);
 
-    // Get git information for display
+        // Check if --path is also specified (for "this" version)
+        let (version, next_override) = if let Some(ref path) = args.path {
+            let manifest = if path.is_dir() {
+                path.join("Cargo.toml")
+            } else {
+                path.clone()
+            };
+            debug!("Using --path for 'this' version: {:?}", manifest);
+
+            // Extract version from the manifest
+            let (manifest_crate_name, manifest_version) = get_crate_info(&manifest)?;
+
+            // Verify crate names match
+            if manifest_crate_name != *crate_name {
+                return Err(Error::ProcessError(format!(
+                    "Crate name mismatch: --crate specifies '{}' but {} contains '{}'",
+                    crate_name,
+                    manifest.display(),
+                    manifest_crate_name
+                )));
+            }
+
+            (manifest_version, CrateOverride::Source(manifest))
+        } else {
+            // No --path, so there's no "this" version
+            // Fetch latest version from crates.io for display purposes
+            debug!("No --path specified, fetching latest version from crates.io");
+            let latest_version = match resolve_latest_version(crate_name, false) {
+                Ok(v) => {
+                    debug!("Latest version of {} is {}", crate_name, v);
+                    v
+                }
+                Err(e) => {
+                    debug!("Failed to fetch latest version: {}, using 0.0.0", e);
+                    "0.0.0".to_string()
+                }
+            };
+            (latest_version, CrateOverride::Default)
+        };
+
+        (crate_name.clone(), version, next_override)
+    } else {
+        // No --crate, use --path or ./Cargo.toml
+        let manifest = if let Some(ref path) = args.path {
+            if path.is_dir() {
+                path.join("Cargo.toml")
+            } else {
+                path.clone()
+            }
+        } else {
+            let env_manifest = env::var("CRUSADER_MANIFEST");
+            PathBuf::from(env_manifest.unwrap_or_else(|_| "./Cargo.toml".to_string()))
+        };
+        debug!("Using manifest {:?}", manifest);
+
+        let (crate_name, version) = get_crate_info(&manifest)?;
+        (crate_name, version, CrateOverride::Source(manifest))
+    };
+
+    // Get git information for display (only if we have a local source)
     let git_hash = get_git_hash();
     let is_dirty = git_hash.is_none() || is_git_dirty();
 
@@ -216,7 +335,7 @@ fn get_config(args: &cli::CliArgs) -> Result<Config, Error> {
         is_dirty,
         staging_dir: args.staging_dir.clone(),
         base_override: CrateOverride::Default,
-        next_override: CrateOverride::Source(manifest),
+        next_override,
         limit,
     })
 }
@@ -330,6 +449,43 @@ enum TestResultData {
     Broken(compile::FourStepResult),
     Skipped(String), // Skipped with reason (e.g., version incompatibility)
     Error(Error),
+    // Phase 5: Multi-version result
+    MultiVersion(Vec<VersionTestOutcome>),
+}
+
+/// Result of testing a dependent against a single version
+#[derive(Debug, Clone)]
+pub struct VersionTestOutcome {
+    pub version_source: compile::VersionSource,
+    pub result: compile::ThreeStepResult,
+}
+
+impl VersionTestOutcome {
+    /// Classify this version test as PASSED, REGRESSED, BROKEN, or ERROR
+    fn classify(&self, baseline_outcome: Option<&VersionTestOutcome>) -> VersionStatus {
+        if self.result.is_success() {
+            VersionStatus::Passed
+        } else {
+            // Failed - determine if REGRESSED or BROKEN
+            if let Some(baseline) = baseline_outcome {
+                if baseline.result.is_success() {
+                    VersionStatus::Regressed
+                } else {
+                    VersionStatus::Broken
+                }
+            } else {
+                // No baseline to compare - treat as BROKEN
+                VersionStatus::Broken
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VersionStatus {
+    Passed,
+    Broken,
+    Regressed,
 }
 
 impl TestResult {
@@ -406,7 +562,20 @@ impl TestResult {
             TestResultData::Regressed(..) => "regressed",
             TestResultData::Broken(_) => "broken",
             TestResultData::Skipped(_) => "skipped",
-            TestResultData::Error(_) => "error"
+            TestResultData::Error(_) => "error",
+            TestResultData::MultiVersion(ref outcomes) => {
+                // For multi-version, return worst status
+                let has_regressed = outcomes.iter().any(|o| {
+                    matches!(o.classify(None), VersionStatus::Regressed)
+                });
+                if has_regressed {
+                    "regressed"
+                } else if outcomes.iter().any(|o| !o.result.is_success()) {
+                    "broken"
+                } else {
+                    "passed"
+                }
+            }
         }
     }
 
@@ -470,6 +639,22 @@ fn run_test(pool: &mut ThreadPool,
     let (result_tx, result_rx) = new_result_receiver(rev_dep.clone());
     pool.execute(move || {
         let res = run_test_local(&config, rev_dep, version);
+        result_tx.send(res).unwrap();
+    });
+
+    return result_rx;
+}
+
+fn run_test_multi_version(
+    pool: &mut ThreadPool,
+    config: Config,
+    rev_dep: RevDepName,
+    version: Option<String>,
+    test_versions: Vec<compile::VersionSource>,
+) -> TestResultReceiver {
+    let (result_tx, result_rx) = new_result_receiver(rev_dep.clone());
+    pool.execute(move || {
+        let res = run_multi_version_test(&config, rev_dep, version, test_versions);
         result_tx.send(res).unwrap();
     });
 
@@ -620,7 +805,7 @@ fn run_test_local(config: &Config, rev_dep: RevDepName, version: Option<String>)
         }
     }
 
-    let base_result = match compile_with_custom_dep(&rev_dep, &config.base_override, &config.staging_dir) {
+    let base_result = match compile_with_custom_dep(&rev_dep, &config.base_override, &config.crate_name, &config.staging_dir) {
         Ok(r) => r,
         Err(e) => return TestResult::error(rev_dep, e)
     };
@@ -628,7 +813,7 @@ fn run_test_local(config: &Config, rev_dep: RevDepName, version: Option<String>)
     if base_result.failed() {
         return TestResult::broken(rev_dep, base_result);
     }
-    let next_result = match compile_with_custom_dep(&rev_dep, &config.next_override, &config.staging_dir) {
+    let next_result = match compile_with_custom_dep(&rev_dep, &config.next_override, &config.crate_name, &config.staging_dir) {
         Ok(r) => r,
         Err(e) => return TestResult::error(rev_dep, e)
     };
@@ -637,6 +822,173 @@ fn run_test_local(config: &Config, rev_dep: RevDepName, version: Option<String>)
         TestResult::regressed(rev_dep, base_result, next_result)
     } else {
         TestResult::passed(rev_dep, base_result, next_result)
+    }
+}
+
+/// Run multi-version ICT tests for a dependent crate (Phase 5)
+///
+/// Tests the dependent against multiple versions of the base crate and returns
+/// a MultiVersion result containing outcomes for each version.
+///
+/// # Version Ordering
+/// 1. Baseline (what the dependent naturally resolves to)
+/// 2. Additional versions from --test-versions
+/// 3. "this" (local WIP) or "latest" (if no local source)
+fn run_multi_version_test(
+    config: &Config,
+    rev_dep: RevDepName,
+    dependent_version: Option<String>,
+    mut test_versions: Vec<compile::VersionSource>,
+) -> TestResult {
+    status(&format!("testing crate {} (multi-version)", rev_dep));
+
+    // Resolve dependent version
+    let mut rev_dep = match resolve_rev_dep_version(rev_dep.clone(), dependent_version) {
+        Ok(r) => r,
+        Err(e) => {
+            let rev_dep = RevDep {
+                name: rev_dep,
+                vers: Version::parse("0.0.0").unwrap(),
+                resolved_version: None,
+            };
+            return TestResult::error(rev_dep, e);
+        }
+    };
+
+    // Extract resolved baseline version for this specific dependent
+    let baseline_version = match extract_resolved_version(&rev_dep, &config.crate_name, &config.staging_dir) {
+        Ok(resolved) => {
+            debug!("Baseline version for {} -> {}: {}", rev_dep.name, config.crate_name, resolved);
+            rev_dep.resolved_version = Some(resolved.clone());
+            Some(resolved)
+        }
+        Err(e) => {
+            debug!("Failed to extract resolved version for {}: {}", rev_dep.name, e);
+            None
+        }
+    };
+
+    // Reorder versions: baseline first, then --test-versions, then this/latest
+    if let Some(ref baseline) = baseline_version {
+        // Remove baseline from test_versions if it's already there
+        test_versions.retain(|v| {
+            if let compile::VersionSource::Published(ref ver) = v {
+                ver != baseline && !baseline.starts_with(&format!("^{}", ver)) && !baseline.starts_with(&format!("~{}", ver))
+            } else {
+                true
+            }
+        });
+
+        // Add baseline at the front
+        test_versions.insert(0, compile::VersionSource::Published(baseline.clone()));
+    }
+
+    // Check version compatibility
+    match check_version_compatibility(&rev_dep, &config) {
+        Ok(true) => {}, // Compatible
+        Ok(false) => {
+            let reason = format!(
+                "Dependent requires version incompatible with {} v{}",
+                config.crate_name, config.version
+            );
+            return TestResult::skipped(rev_dep, reason);
+        }
+        Err(e) => {
+            debug!("Failed to check version compatibility: {}, testing anyway", e);
+        }
+    }
+
+    // Unpack the dependent crate once (cached)
+    let staging_path = config.staging_dir.join(format!("{}-{}", rev_dep.name, rev_dep.vers));
+    if !staging_path.exists() {
+        debug!("Unpacking {} to staging for multi-version test", rev_dep.name);
+        match get_crate_handle(&rev_dep) {
+            Ok(handle) => {
+                if let Err(e) = fs::create_dir_all(&staging_path) {
+                    return TestResult::error(rev_dep, Error::IoError(e));
+                }
+                if let Err(e) = handle.unpack_source_to(&staging_path) {
+                    return TestResult::error(rev_dep, e);
+                }
+            }
+            Err(e) => return TestResult::error(rev_dep, e),
+        }
+    }
+
+    // Run ICT tests for each version
+    let mut outcomes = Vec::new();
+    for version_source in test_versions {
+        debug!("Testing {} against version {}", rev_dep.name, version_source.label());
+
+        // For published versions, download and unpack them for patching
+        let override_path = match &version_source {
+            compile::VersionSource::Local(path) => {
+                // If path points to Cargo.toml, extract directory
+                let dir_path = if path.ends_with("Cargo.toml") {
+                    path.parent().unwrap().to_path_buf()
+                } else {
+                    path.clone()
+                };
+                Some(dir_path)
+            }
+            compile::VersionSource::Published(version) => {
+                match download_and_unpack_base_crate_version(
+                    &config.crate_name,
+                    version,
+                    &config.staging_dir,
+                ) {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        status(&format!("Warning: Failed to download {} {}: {}", config.crate_name, version, e));
+                        // Create a failed outcome
+                        let failed_result = compile::ThreeStepResult {
+                            fetch: compile::CompileResult {
+                                step: compile::CompileStep::Fetch,
+                                success: false,
+                                stdout: String::new(),
+                                stderr: format!("Failed to download base crate: {}", e),
+                                duration: Duration::from_secs(0),
+                                diagnostics: Vec::new(),
+                            },
+                            check: None,
+                            test: None,
+                        };
+                        outcomes.push(VersionTestOutcome {
+                            version_source: version_source.clone(),
+                            result: failed_result,
+                        });
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let skip_check = false; // TODO: Get from args
+        let skip_test = false;  // TODO: Get from args
+
+        match compile::run_three_step_ict(
+            &staging_path,
+            &config.crate_name,
+            override_path.as_deref(),
+            skip_check,
+            skip_test,
+        ) {
+            Ok(result) => {
+                outcomes.push(VersionTestOutcome {
+                    version_source: version_source.clone(),
+                    result,
+                });
+            }
+            Err(e) => {
+                // ICT test failed with error - create a failed outcome
+                return TestResult::error(rev_dep, Error::ProcessError(e));
+            }
+        }
+    }
+
+    TestResult {
+        rev_dep,
+        data: TestResultData::MultiVersion(outcomes),
     }
 }
 
@@ -759,11 +1111,36 @@ fn resolve_rev_dep_version(name: RevDepName, version: Option<String>) -> Result<
     }).ok_or(Error::NoCrateVersions)
 }
 
+/// Resolve 'latest' or 'latest-preview' keyword to actual version
+fn resolve_latest_version(crate_name: &str, include_prerelease: bool) -> Result<String, Error> {
+    debug!("Resolving latest version for {} (prerelease={})", crate_name, include_prerelease);
+
+    let krate = CRATES_IO_CLIENT.get_crate(crate_name)
+        .map_err(|e| Error::CratesIoApiError(e.to_string()))?;
+
+    // Filter and sort versions
+    let mut versions: Vec<Version> = krate.versions.iter()
+        .filter_map(|r| Version::parse(&r.num).ok())
+        .filter(|v| include_prerelease || v.pre.is_empty()) // Filter pre-releases unless requested
+        .collect();
+
+    versions.sort();
+
+    versions.pop()
+        .map(|v| v.to_string())
+        .ok_or(Error::NoCrateVersions)
+}
+
 
 // CompileResult is now in compile module
 type CompileResult = compile::CompileResult;
 
-fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride, staging_dir: &Path) -> Result<CompileResult, Error> {
+fn compile_with_custom_dep(
+    rev_dep: &RevDep,
+    krate: &CrateOverride,
+    crate_name: &str,
+    staging_dir: &Path
+) -> Result<CompileResult, Error> {
     // Use staging directory instead of temp dir to cache build artifacts
     fs::create_dir_all(staging_dir)?;
     let staging_path = staging_dir.join(format!("{}-{}", rev_dep.name, rev_dep.vers));
@@ -778,30 +1155,46 @@ fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride, staging_dir:
         debug!("Using cached staging dir for compilation of {}", rev_dep.name);
     }
 
-    let ref source_dir = staging_path;
+    let source_dir = &staging_path;
 
-    match *krate {
-        CrateOverride::Default => {
-            // Clean up any existing .cargo/config from previous runs
-            let cargo_dir = source_dir.join(".cargo");
-            if cargo_dir.exists() {
-                fs::remove_dir_all(&cargo_dir).ok(); // Ignore errors
-            }
-        },
-        CrateOverride::Source(ref path) => {
-            // Emit a .cargo/config file to override the project's
-            // dependency on *our* project with the WIP.
-            (emit_cargo_override_path(source_dir, path)?);
-        }
+    // Clean up any existing .cargo/config from previous runs (old system)
+    let cargo_dir = source_dir.join(".cargo");
+    if cargo_dir.exists() {
+        fs::remove_dir_all(&cargo_dir).ok(); // Ignore errors
     }
 
-    // NB: The way cargo searches for .cargo/config, which we use to
-    // override dependencies, depends on the CWD, and is not affected
-    // by the --manifest-path flag, so this is changing directories.
+    // Build override spec for new --config system
+    let override_spec = match krate {
+        CrateOverride::Default => None,
+        CrateOverride::Source(ref path) => {
+            // Extract directory from Cargo.toml path
+            let override_dir = if path.ends_with("Cargo.toml") {
+                path.parent().unwrap()
+            } else {
+                path.as_path()
+            };
+            Some((crate_name, override_dir))
+        }
+    };
+
+    // Use cargo build with --config flag (legacy: still using build instead of check)
     let start = std::time::Instant::now();
     let mut cmd = Command::new("cargo");
-    let cmd = cmd.arg("build")
-        .current_dir(source_dir);
+    cmd.arg("build").current_dir(source_dir);
+
+    if let Some((name, path)) = override_spec {
+        // Convert to absolute path
+        let abs_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            env::current_dir()?.join(path)
+        };
+
+        let config_str = format!("patch.crates-io.{}.path=\"{}\"", name, abs_path.display());
+        cmd.arg("--config").arg(&config_str);
+        debug!("using --config: {}", config_str);
+    }
+
     debug!("running cargo: {:?}", cmd);
     let r = cmd.output()?;
 
@@ -813,8 +1206,8 @@ fn compile_with_custom_dep(rev_dep: &RevDep, krate: &CrateOverride, staging_dir:
     Ok(CompileResult {
         step: compile::CompileStep::Check, // Legacy: using Check for old build command
         success,
-        stdout: (String::from_utf8(r.stdout)?),
-        stderr: (String::from_utf8(r.stderr)?),
+        stdout: String::from_utf8(r.stdout)?,
+        stderr: String::from_utf8(r.stderr)?,
         duration,
         diagnostics: Vec::new(), // Legacy path doesn't use JSON parsing
     })
@@ -842,6 +1235,58 @@ fn get_crate_handle(rev_dep: &RevDep) -> Result<CrateHandle, Error> {
     return Ok(CrateHandle(crate_file));
 }
 
+/// Parse a version string that might be a version requirement (like "^0.8.0")
+/// and extract just the version part
+fn parse_version_from_requirement(version_str: &str) -> String {
+    // Remove common version requirement prefixes
+    let cleaned = version_str
+        .trim()
+        .trim_start_matches('^')
+        .trim_start_matches('~')
+        .trim_start_matches('=')
+        .trim();
+
+    debug!("Parsed '{}' from requirement '{}'", cleaned, version_str);
+    cleaned.to_string()
+}
+
+/// Download and unpack a specific version of the base crate for patching
+/// Returns the path to the unpacked source
+fn download_and_unpack_base_crate_version(
+    crate_name: &str,
+    version: &str,
+    staging_dir: &Path,
+) -> Result<PathBuf, Error> {
+    debug!("Downloading and unpacking {} version {}", crate_name, version);
+
+    // Parse version requirement if needed (e.g., "^0.8.0" -> "0.8.0")
+    let clean_version = parse_version_from_requirement(version);
+
+    // Create a pseudo-RevDep for downloading
+    let vers = Version::parse(&clean_version)
+        .map_err(|e| Error::SemverError(e))?;
+    let pseudo_dep = RevDep {
+        name: RevDepName::from(crate_name.to_string()),
+        vers,
+        resolved_version: None,
+    };
+
+    // Download the crate
+    let crate_handle = get_crate_handle(&pseudo_dep)?;
+
+    // Unpack to staging directory
+    let unpack_path = staging_dir.join(format!("base-{}-{}", crate_name, clean_version));
+    if !unpack_path.exists() {
+        fs::create_dir_all(&unpack_path)?;
+        crate_handle.unpack_source_to(&unpack_path)?;
+        debug!("Unpacked {} {} to {:?}", crate_name, clean_version, unpack_path);
+    } else {
+        debug!("Using cached base crate at {:?}", unpack_path);
+    }
+
+    Ok(unpack_path)
+}
+
 impl CrateHandle {
     fn unpack_source_to(&self, path: &Path) -> Result<(), Error> {
         debug!("unpackng {:?} to {:?}", self.0, path);
@@ -864,29 +1309,6 @@ impl CrateHandle {
     }
 }
 
-fn emit_cargo_override_path(source_dir: &Path, override_path: &Path) -> Result<(), Error> {
-    debug!("overriding cargo path in {:?} with {:?}", source_dir, override_path);
-
-    assert!(override_path.ends_with("Cargo.toml"));
-    let override_path = override_path.parent().unwrap();
-
-    // Since cargo is going to be run with --manifest-path to change
-    // directories a relative path is not going to make sense.
-    let override_path = if override_path.is_absolute() {
-        override_path.to_path_buf()
-    } else {
-        (env::current_dir()?).join(override_path)
-    };
-    let ref cargo_dir = source_dir.join(".cargo");
-    (fs::create_dir_all(cargo_dir)?);
-    let ref config_path = cargo_dir.join("config");
-    let mut file = File::create(config_path)?;
-    let s = format!(r#"paths = ["{}"]"#, override_path.to_str().unwrap());
-    file.write_all(s.as_bytes())?;
-    file.flush()?;
-
-    Ok(())
-}
 
 fn status_lock<F>(f: F) where F: FnOnce() -> () {
    lazy_static! {
@@ -940,6 +1362,7 @@ fn report_quick_result(current_num: usize, total: usize, result: &TestResult) {
             TestResultData::Broken(_) => term::color::BRIGHT_YELLOW,
             TestResultData::Skipped(_) => term::color::BRIGHT_CYAN,
             TestResultData::Error(_) => term::color::BRIGHT_MAGENTA,
+            TestResultData::MultiVersion(_) => term::color::BRIGHT_GREEN, // TODO: Compute worst status
         };
         print_color(&format!("{}", result.quick_str()), color);
         println!("");

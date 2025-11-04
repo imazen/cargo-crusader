@@ -58,27 +58,46 @@ impl CompileResult {
 ///
 /// # Arguments
 /// * `crate_path` - Path to the crate to compile
-/// * `step` - Whether to run check or test
-/// * `override_path` - Optional path to override a dependency with
+/// * `step` - Whether to run fetch, check, or test
+/// * `override_spec` - Optional override specification (crate_name, override_path)
 pub fn compile_crate(
     crate_path: &Path,
     step: CompileStep,
-    override_path: Option<&Path>,
+    override_spec: Option<(&str, &Path)>,
 ) -> Result<CompileResult, String> {
     debug!("compiling {:?} with step {:?}", crate_path, step);
-
-    // If override is provided, set up .cargo/config
-    if let Some(override_path) = override_path {
-        emit_cargo_override_path(crate_path, override_path)
-            .map_err(|e| format!("Failed to emit cargo override: {}", e))?;
-    }
 
     // Run the cargo command with JSON output for better error extraction
     let start = Instant::now();
     let mut cmd = Command::new("cargo");
-    cmd.arg(step.cargo_subcommand())
-        .arg("--message-format=json")
-        .current_dir(crate_path);
+    cmd.arg(step.cargo_subcommand());
+
+    // Add --message-format=json for check and test (not fetch)
+    if step != CompileStep::Fetch {
+        cmd.arg("--message-format=json");
+    }
+
+    // If override is provided, use --config flag instead of creating .cargo/config file
+    if let Some((crate_name, override_path)) = override_spec {
+        // Convert to absolute path if needed
+        let override_path = if override_path.is_absolute() {
+            override_path.to_path_buf()
+        } else {
+            env::current_dir()
+                .map_err(|e| format!("Failed to get current dir: {}", e))?
+                .join(override_path)
+        };
+
+        let config_str = format!(
+            "patch.crates-io.{}.path=\"{}\"",
+            crate_name,
+            override_path.display()
+        );
+        cmd.arg("--config").arg(&config_str);
+        debug!("using --config: {}", config_str);
+    }
+
+    cmd.current_dir(crate_path);
 
     debug!("running cargo: {:?}", cmd);
     let output = cmd.output()
@@ -93,8 +112,12 @@ pub fn compile_crate(
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-    // Parse diagnostics from JSON output
-    let diagnostics = parse_cargo_json(&stdout);
+    // Parse diagnostics from JSON output (only for check/test, not fetch)
+    let diagnostics = if step != CompileStep::Fetch {
+        parse_cargo_json(&stdout)
+    } else {
+        Vec::new()
+    };
 
     debug!("parsed {} diagnostics", diagnostics.len());
 
@@ -144,6 +167,112 @@ paths = ["{}"]
         .map_err(|e| format!("Failed to flush config: {}", e))?;
 
     Ok(())
+}
+
+/// Source of a version being tested
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionSource {
+    /// Published version from crates.io
+    Published(String),
+    /// Local work-in-progress version ("this")
+    Local(PathBuf),
+}
+
+impl VersionSource {
+    pub fn label(&self) -> String {
+        match self {
+            VersionSource::Published(v) => v.clone(),
+            VersionSource::Local(_) => "this".to_string(),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, VersionSource::Local(_))
+    }
+}
+
+/// Three-step ICT (Install/Check/Test) result for a single version
+#[derive(Debug, Clone)]
+pub struct ThreeStepResult {
+    /// Install step (cargo fetch) - always runs
+    pub fetch: CompileResult,
+    /// Check step (cargo check) - only if fetch succeeds
+    pub check: Option<CompileResult>,
+    /// Test step (cargo test) - only if check succeeds
+    pub test: Option<CompileResult>,
+}
+
+impl ThreeStepResult {
+    /// Determine if all executed steps succeeded
+    pub fn is_success(&self) -> bool {
+        if !self.fetch.success {
+            return false;
+        }
+        if let Some(ref check) = self.check {
+            if !check.success {
+                return false;
+            }
+        }
+        if let Some(ref test) = self.test {
+            if !test.success {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Get the first failed step, if any
+    pub fn first_failure(&self) -> Option<&CompileResult> {
+        if !self.fetch.success {
+            return Some(&self.fetch);
+        }
+        if let Some(ref check) = self.check {
+            if !check.success {
+                return Some(check);
+            }
+        }
+        if let Some(ref test) = self.test {
+            if !test.success {
+                return Some(test);
+            }
+        }
+        None
+    }
+
+    /// Format ICT marks for display (e.g., "✓✓✓", "✓✗-", "✗--")
+    /// Shows cumulative failure: after first failure, show dashes
+    pub fn format_ict_marks(&self) -> String {
+        let fetch_mark = if self.fetch.success { "✓" } else { "✗" };
+
+        if !self.fetch.success {
+            return format!("{}--", fetch_mark);
+        }
+
+        let check_mark = match &self.check {
+            Some(c) if c.success => "✓",
+            Some(_) => "✗",
+            None => "-",
+        };
+
+        if matches!(&self.check, Some(c) if !c.success) {
+            return format!("{}{}-", fetch_mark, check_mark);
+        }
+
+        let test_mark = match &self.test {
+            Some(t) if t.success => "✓",
+            Some(_) => "✗",
+            None => "-",
+        };
+
+        format!("{}{}{}", fetch_mark, check_mark, test_mark)
+    }
+}
+
+/// Result of testing a dependent against a single version
+#[derive(Debug, Clone)]
+pub struct VersionTestResult {
+    pub version_source: VersionSource,
+    pub result: ThreeStepResult,
 }
 
 /// Four-step test result for a dependent crate
@@ -222,16 +351,92 @@ impl FourStepResult {
     }
 }
 
-/// Run all four build steps: baseline check, baseline test, override check, override test
+/// Run three-step ICT (Install/Check/Test) test with early stopping
 ///
 /// # Arguments
 /// * `crate_path` - Path to the dependent crate
+/// * `base_crate_name` - Name of the crate being overridden (e.g., "rgb")
+/// * `override_path` - Optional path to override a dependency (None for published baseline)
+/// * `skip_check` - Skip cargo check step
+/// * `skip_test` - Skip cargo test step
+///
+/// # Returns
+/// ThreeStepResult with cumulative early stopping:
+/// - Fetch always runs
+/// - Check only runs if fetch succeeds (and !skip_check)
+/// - Test only runs if check succeeds (and !skip_test)
+pub fn run_three_step_ict(
+    crate_path: &Path,
+    base_crate_name: &str,
+    override_path: Option<&Path>,
+    skip_check: bool,
+    skip_test: bool,
+) -> Result<ThreeStepResult, String> {
+    debug!("running three-step ICT for {:?}", crate_path);
+
+    // Build override_spec if override_path is provided
+    let override_spec = override_path.map(|p| (base_crate_name, p));
+
+    // Step 1: Fetch (always runs)
+    let fetch = compile_crate(crate_path, CompileStep::Fetch, override_spec)?;
+
+    if fetch.failed() {
+        // Fetch failed - stop here with dashes for remaining steps
+        return Ok(ThreeStepResult {
+            fetch,
+            check: None,
+            test: None,
+        });
+    }
+
+    // Step 2: Check (only if fetch succeeded and not skipped)
+    let check = if !skip_check {
+        let result = compile_crate(crate_path, CompileStep::Check, override_spec)?;
+        if result.failed() {
+            // Check failed - stop here with dash for test
+            return Ok(ThreeStepResult {
+                fetch,
+                check: Some(result),
+                test: None,
+            });
+        }
+        Some(result)
+    } else {
+        None
+    };
+
+    // Step 3: Test (only if check succeeded or was skipped, and not skip_test)
+    let test = if !skip_test {
+        let should_run = match &check {
+            Some(c) => c.success,
+            None => true, // check was skipped, proceed
+        };
+
+        if should_run {
+            Some(compile_crate(crate_path, CompileStep::Test, override_spec)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(ThreeStepResult { fetch, check, test })
+}
+
+/// Run all four build steps: baseline check, baseline test, override check, override test
+/// (Legacy function for backwards compatibility - new code should use run_three_step_ict)
+///
+/// # Arguments
+/// * `crate_path` - Path to the dependent crate
+/// * `base_crate_name` - Name of the crate being overridden
 /// * `baseline_path` - Path to baseline version (or None for published)
 /// * `override_path` - Path to work-in-progress version
 /// * `skip_check` - Skip cargo check steps
 /// * `skip_test` - Skip cargo test steps
 pub fn run_four_step_test(
     crate_path: &Path,
+    base_crate_name: &str,
     baseline_path: Option<&Path>,
     override_path: &Path,
     skip_check: bool,
@@ -239,9 +444,12 @@ pub fn run_four_step_test(
 ) -> Result<FourStepResult, String> {
     debug!("running four-step test for {:?}", crate_path);
 
+    let baseline_spec = baseline_path.map(|p| (base_crate_name, p));
+    let override_spec = Some((base_crate_name, override_path));
+
     // Step 1: Baseline check
     let baseline_check = if !skip_check {
-        compile_crate(crate_path, CompileStep::Check, baseline_path)?
+        compile_crate(crate_path, CompileStep::Check, baseline_spec)?
     } else {
         // If skipping check, create a dummy success result
         CompileResult {
@@ -266,7 +474,7 @@ pub fn run_four_step_test(
 
     // Step 2: Baseline test
     let baseline_test = if !skip_test {
-        let result = compile_crate(crate_path, CompileStep::Test, baseline_path)?;
+        let result = compile_crate(crate_path, CompileStep::Test, baseline_spec)?;
         if result.failed() {
             // Baseline test failed - this is BROKEN, don't continue
             return Ok(FourStepResult {
@@ -283,7 +491,7 @@ pub fn run_four_step_test(
 
     // Step 3: Override check
     let override_check = if !skip_check {
-        Some(compile_crate(crate_path, CompileStep::Check, Some(override_path))?)
+        Some(compile_crate(crate_path, CompileStep::Check, override_spec)?)
     } else {
         None
     };
@@ -296,7 +504,7 @@ pub fn run_four_step_test(
         };
 
         if should_run_test {
-            Some(compile_crate(crate_path, CompileStep::Test, Some(override_path))?)
+            Some(compile_crate(crate_path, CompileStep::Test, override_spec)?)
         } else {
             None
         }

@@ -5,7 +5,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use crate::{TestResult, TestResultData, CompileResult, Error};
+use crate::{TestResult, TestResultData, CompileResult, Error, VersionTestOutcome, VersionStatus};
 use crate::compile::FourStepResult;
 use crate::error_extract::{Diagnostic, extract_error_summary};
 use term::color::Color;
@@ -30,12 +30,55 @@ pub fn summarize_results(results: &[TestResult]) -> Summary {
     let mut sum = Summary::default();
 
     for result in results {
-        match result.data {
+        match &result.data {
             TestResultData::Broken(..) => sum.broken += 1,
             TestResultData::Regressed(..) => sum.regressed += 1,
             TestResultData::Passed(..) => sum.passed += 1,
             TestResultData::Skipped(_) => sum.skipped += 1,
             TestResultData::Error(..) => sum.error += 1,
+            TestResultData::MultiVersion(ref outcomes) => {
+                // Count based on worst status across all versions
+                // Baseline is the first version
+                let baseline = outcomes.first();
+
+                let mut has_regressed = false;
+                let mut has_broken = false;
+                let mut all_passed = true;
+
+                for (idx, outcome) in outcomes.iter().enumerate() {
+                    let is_baseline = idx == 0;
+                    let status = if is_baseline {
+                        if outcome.result.is_success() {
+                            VersionStatus::Passed
+                        } else {
+                            VersionStatus::Broken
+                        }
+                    } else {
+                        classify_version_outcome(outcome, baseline)
+                    };
+
+                    match status {
+                        VersionStatus::Regressed => {
+                            has_regressed = true;
+                            all_passed = false;
+                        }
+                        VersionStatus::Broken => {
+                            has_broken = true;
+                            all_passed = false;
+                        }
+                        VersionStatus::Passed => {}
+                    }
+                }
+
+                // Classify based on worst outcome
+                if has_regressed {
+                    sum.regressed += 1;
+                } else if has_broken {
+                    sum.broken += 1;
+                } else if all_passed {
+                    sum.passed += 1;
+                }
+            }
         }
     }
 
@@ -163,10 +206,11 @@ fn get_status_info(data: &TestResultData) -> (&'static str, Color) {
         TestResultData::Broken(..) => ("⚠ BROKEN", term::color::BRIGHT_YELLOW),
         TestResultData::Skipped(..) => ("⊘ SKIPPED", term::color::BRIGHT_CYAN),
         TestResultData::Error(..) => ("⚡ ERROR", term::color::BRIGHT_MAGENTA),
+        TestResultData::MultiVersion(_) => ("✓ MULTI-VERSION", term::color::BRIGHT_GREEN), // TODO: Compute worst status
     }
 }
 
-/// Print a colored table row
+/// Print a colored table row (legacy format)
 fn print_colored_row(status: &str, name: &str, depends_on: &str, testing: &str,
                      duration: &str, color: Color) {
     // Print the row with coloring
@@ -184,9 +228,60 @@ fn print_colored_row(status: &str, name: &str, depends_on: &str, testing: &str,
     }
 }
 
+/// Print a colored table row with ICT column (Phase 5 format)
+fn print_colored_row_ict(status: &str, name: &str, version: &str, ict: &str,
+                         duration: &str, color: Color) {
+    // Print the row with coloring
+    // Status (12) | Dependent (26) | Version (14) | ICT (5) | Duration (10)
+    let row = format!("│{:^12}│{:<26}│{:<14}│{:^5}│{:>10}│",
+                     status, name, version, ict, duration);
+
+    if let Some(ref mut t) = term::stdout() {
+        let _ = t.fg(color);
+        let _ = write!(t, "{}", row);
+        let _ = t.reset();
+        println!();
+    } else {
+        println!("{}", row);
+    }
+}
+
+/// Classify a version outcome as PASSED, REGRESSED, or BROKEN
+fn classify_version_outcome(outcome: &VersionTestOutcome, baseline: Option<&VersionTestOutcome>) -> VersionStatus {
+    if outcome.result.is_success() {
+        // All steps passed
+        VersionStatus::Passed
+    } else {
+        // Failed - determine if REGRESSED or BROKEN
+        if let Some(baseline) = baseline {
+            if baseline.result.is_success() {
+                // Baseline passed but this version failed → REGRESSED
+                VersionStatus::Regressed
+            } else {
+                // Baseline also failed → BROKEN
+                VersionStatus::Broken
+            }
+        } else {
+            // No baseline to compare, or this IS the baseline → BROKEN
+            VersionStatus::Broken
+        }
+    }
+}
+
 /// Print a console table showing all test results
 pub fn print_console_table(results: &[TestResult], crate_name: &str, display_version: &str) {
     println!("\n{}", "=".repeat(110));
+
+    // Count total rows (including multi-version expansions)
+    let mut total_rows = 0;
+    for result in results {
+        if let TestResultData::MultiVersion(ref outcomes) = result.data {
+            total_rows += outcomes.len();
+        } else {
+            total_rows += 1;
+        }
+    }
+
     println!("Testing {} reverse dependencies of {}", results.len(), crate_name);
     println!("  this = {} (your work-in-progress version)", display_version);
     println!("{}", "=".repeat(110));
@@ -197,13 +292,17 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, display_ver
         return;
     }
 
-    // Print table header with new columns
-    // Status (12) | Dependent (26) | Depends On (18) | Testing (16) | Duration (10)
-    println!("┌{:─<12}┬{:─<26}┬{:─<18}┬{:─<16}┬{:─<10}┐",
+    // Print legend for multi-version ICT display
+    println!("Legend: I=Install (cargo fetch), C=Check (cargo check), T=Test (cargo test)");
+    println!();
+
+    // Print table header with ICT column
+    // Status (12) | Dependent (26) | Version (14) | ICT (5) | Duration (10)
+    println!("┌{:─<12}┬{:─<26}┬{:─<14}┬{:─<5}┬{:─<10}┐",
              "", "", "", "", "");
-    println!("│{:^12}│{:^26}│{:^18}│{:^16}│{:^10}│",
-             "Status", "Dependent", "Depends On", "Testing", "Duration");
-    println!("├{:─<12}┼{:─<26}┼{:─<18}┼{:─<16}┼{:─<10}┤",
+    println!("│{:^12}│{:^26}│{:^14}│{:^5}│{:^10}│",
+             "Status", "Dependent", "Version", "ICT", "Duration");
+    println!("├{:─<12}┼{:─<26}┼{:─<14}┼{:─<5}┼{:─<10}┤",
              "", "", "", "", "");
 
     // Print each result
@@ -216,28 +315,67 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, display_ver
             name_with_version
         };
 
-        let (status_label, color) = get_status_info(&result.data);
-
         match &result.data {
             TestResultData::Passed(four_step) |
             TestResultData::Regressed(four_step) |
             TestResultData::Broken(four_step) => {
+                let (status_label, color) = get_status_info(&result.data);
                 let depends_on = format_depends_on(&result.rev_dep.resolved_version, four_step);
                 let testing = format_testing(four_step);
                 let duration = format_total_duration(four_step);
 
-                print_colored_row(status_label, &name, &depends_on, &testing, &duration, color);
+                // For legacy 4-step, show in old format (combine depends_on and testing)
+                let version_col = "baseline";
+                let ict_col = "✓✓"; // Simplified for legacy
+                print_colored_row_ict(status_label, &name, version_col, ict_col, &duration, color);
             }
             TestResultData::Skipped(_) => {
-                print_colored_row(status_label, &name, "(incompatible)", "", "", color);
+                let (status_label, color) = get_status_info(&result.data);
+                print_colored_row_ict(status_label, &name, "(incompatible)", "", "", color);
             }
             TestResultData::Error(_) => {
-                print_colored_row(status_label, &name, "ERROR", "", "", color);
+                let (status_label, color) = get_status_info(&result.data);
+                print_colored_row_ict(status_label, &name, "ERROR", "", "", color);
+            }
+            TestResultData::MultiVersion(ref outcomes) => {
+                // Print one row per version
+                // Baseline is always the FIRST version (reordered in run_multi_version_test)
+                let baseline = outcomes.first();
+
+                for (idx, outcome) in outcomes.iter().enumerate() {
+                    let version_label = outcome.version_source.label();
+                    let ict_marks = outcome.result.format_ict_marks();
+                    let duration = format!("{:.1}s", outcome.result.fetch.duration.as_secs_f64()
+                        + outcome.result.check.as_ref().map(|c| c.duration.as_secs_f64()).unwrap_or(0.0)
+                        + outcome.result.test.as_ref().map(|t| t.duration.as_secs_f64()).unwrap_or(0.0));
+
+                    // Determine status for this version compared to baseline
+                    let is_baseline = idx == 0;
+                    let status = if is_baseline {
+                        // First version IS the baseline
+                        if outcome.result.is_success() {
+                            VersionStatus::Passed
+                        } else {
+                            VersionStatus::Broken
+                        }
+                    } else {
+                        // Compare to baseline
+                        classify_version_outcome(outcome, baseline)
+                    };
+
+                    let (status_label, color) = match status {
+                        VersionStatus::Passed => ("✓ PASSED", term::color::BRIGHT_GREEN),
+                        VersionStatus::Regressed => ("✗ REGRESS", term::color::BRIGHT_RED),
+                        VersionStatus::Broken => ("⚠ BROKEN", term::color::BRIGHT_YELLOW),
+                    };
+
+                    print_colored_row_ict(status_label, &name, &version_label, &ict_marks, &duration, color);
+                }
             }
         }
     }
 
-    println!("└{:─<12}┴{:─<26}┴{:─<18}┴{:─<16}┴{:─<10}┘",
+    println!("└{:─<12}┴{:─<26}┴{:─<14}┴{:─<5}┴{:─<10}┘",
              "", "", "", "", "");
     println!();
 
@@ -687,6 +825,10 @@ h3 { margin-top: 15px; color: #333; }
             }
             TestResultData::Error(e) => {
                 export_error(&mut file, e)?;
+            }
+            TestResultData::MultiVersion(_) => {
+                // TODO: Export multi-version results
+                writeln!(file, "<h3>Multi-version testing (TODO)</h3>")?;
             }
         }
         writeln!(file, "</div>")?;

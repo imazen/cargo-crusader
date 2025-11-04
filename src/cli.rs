@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
@@ -9,6 +9,10 @@ pub struct CliArgs {
     /// Path to the crate to test (directory or Cargo.toml file)
     #[arg(long, short = 'p', value_name = "PATH")]
     pub path: Option<PathBuf>,
+
+    /// Name of the crate to test (for testing published crates without local source)
+    #[arg(long = "crate", visible_alias = "crate-name", short = 'c', value_name = "CRATE")]
+    pub crate_name: Option<String>,
 
     /// Test top N reverse dependencies by download count
     #[arg(long, default_value = "5")]
@@ -25,7 +29,8 @@ pub struct CliArgs {
 
     /// Test against specific versions of the base crate (e.g., "0.3.0 4.1.1")
     /// When specified with --path, includes "this" (WIP version) automatically
-    #[arg(long, value_name = "VERSION")]
+    /// Supports versions with hyphens: "0.8.0 1.0.0-rc.1 1.0.0-alpha.2"
+    #[arg(long, value_name = "VERSION", num_args = 1..)]
     pub test_versions: Vec<String>,
 
     /// Number of parallel test jobs
@@ -78,6 +83,19 @@ impl CliArgs {
             return Err("--jobs must be at least 1".to_string());
         }
 
+        // Check if we have a way to determine the crate name
+        let has_path = self.path.is_some();
+        let has_crate = self.crate_name.is_some();
+        let has_local_manifest = std::path::Path::new("./Cargo.toml").exists();
+
+        if !has_path && !has_crate && !has_local_manifest {
+            return Err(
+                "Cannot determine which crate to test. \
+                 Please specify --path <PATH>, --crate <NAME>, or run from a crate directory with ./Cargo.toml"
+                    .to_string(),
+            );
+        }
+
         Ok(())
     }
 
@@ -97,6 +115,7 @@ mod tests {
     fn test_validate_both_no_flags_fails() {
         let args = CliArgs {
             path: None,
+            crate_name: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
@@ -115,6 +134,7 @@ mod tests {
     fn test_validate_zero_jobs_fails() {
         let args = CliArgs {
             path: None,
+            crate_name: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
@@ -131,8 +151,12 @@ mod tests {
 
     #[test]
     fn test_validate_valid_config_succeeds() {
+        // Create a temp Cargo.toml so validation passes
+        std::fs::write("./Cargo.toml.test", "[package]\nname = \"test\"\nversion = \"0.1.0\"\n").ok();
+
         let args = CliArgs {
-            path: None,
+            path: Some(PathBuf::from("./Cargo.toml.test")),
+            crate_name: None,
             top_dependents: 5,
             dependents: vec![],
             dependent_paths: vec![],
@@ -144,13 +168,16 @@ mod tests {
             no_test: false,
             json: false,
         };
-        assert!(args.validate().is_ok());
+        let result = args.validate();
+        std::fs::remove_file("./Cargo.toml.test").ok();
+        assert!(result.is_ok());
     }
 
     #[test]
     fn test_is_offline_mode() {
         let args = CliArgs {
             path: None,
+            crate_name: None,
             top_dependents: 0,
             dependents: vec![],
             dependent_paths: vec![PathBuf::from("/tmp/crate")],
@@ -169,6 +196,7 @@ mod tests {
     fn test_not_offline_mode_with_dependents() {
         let args = CliArgs {
             path: None,
+            crate_name: None,
             top_dependents: 0,
             dependents: vec!["serde".to_string()],
             dependent_paths: vec![],
