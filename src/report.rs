@@ -6,9 +6,116 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use crate::{TestResult, TestResultData, CompileResult, Error, VersionTestOutcome, VersionStatus};
-use crate::compile::FourStepResult;
-use crate::error_extract::{Diagnostic, extract_error_summary};
+use crate::compile::{FourStepResult, VersionSource, ThreeStepResult};
 use term::color::Color;
+
+/// Status of a version test for the Offered column
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestStatus {
+    Passed,     // ✓
+    Regressed,  // ✗
+    Broken,     // ⚠
+}
+
+/// Natural resolution outcome (when respecting semver)
+#[derive(Debug, Clone, PartialEq)]
+pub enum NaturalResolution {
+    Exact,      // = (cargo resolved to exact offered version)
+    Upgraded,   // ↑ (cargo upgraded within semver range)
+}
+
+/// Data for rendering a single row in the table
+#[derive(Debug, Clone)]
+pub struct TableRow {
+    pub offered: OfferedCell,
+    pub spec: String,
+    pub resolved: String,
+    pub dependent: String,
+    pub result: String,
+    pub time: String,
+    pub color: Color,
+    pub error_details: Vec<String>,  // Additional error lines
+    pub multi_version_rows: Vec<MultiVersionRow>,  // Additional version rows
+}
+
+/// Content of the "Offered" cell - encodes valid combinations only
+#[derive(Debug, Clone)]
+pub enum OfferedCell {
+    /// Baseline test: "-" only
+    Baseline,
+
+    /// Skipped test with no version info: "⊘" only (for errors/whole-dependent skips)
+    SkippedNoVersion,
+
+    /// Skipped test with version: "⊘ ↑version" or "⊘ ≠version" (cargo resolved to different version)
+    SkippedWithVersion {
+        resolution: NaturalResolution,  // ↑ or ≠
+        version: String,                // "0.8.48" etc
+    },
+
+    /// Natural resolution (respects semver): "✓ =version" or "✓ ↑version"
+    Natural {
+        status: TestStatus,             // ✓/✗/⚠
+        resolution: NaturalResolution,  // = or ↑
+        version: String,                // "this(0.8.91)" or "0.8.51"
+    },
+
+    /// Forced resolution (bypasses semver): "✓ ≠version [≠→!]"
+    /// Resolution is always Mismatch (≠), displayed with [≠→!] suffix
+    Forced {
+        status: TestStatus,  // ✓/✗/⚠
+        version: String,     // "this(0.8.91)" or "0.8.51"
+    },
+}
+
+/// Additional row for multi-version resolution
+#[derive(Debug, Clone)]
+pub struct MultiVersionRow {
+    pub spec: String,
+    pub resolved: String,
+    pub dependent: String,
+}
+
+impl OfferedCell {
+    /// Format the offered cell content
+    pub fn format(&self) -> String {
+        match self {
+            OfferedCell::Baseline => "-".to_string(),
+            OfferedCell::SkippedNoVersion => "⊘".to_string(),
+            OfferedCell::SkippedWithVersion { resolution, version } => {
+                let resolution_symbol = match resolution {
+                    NaturalResolution::Exact => "=",
+                    NaturalResolution::Upgraded => "↑",
+                };
+                format!("⊘ {}{}", resolution_symbol, version)
+            }
+            OfferedCell::Natural { status, resolution, version } => {
+                let status_icon = match status {
+                    TestStatus::Passed => "✓",
+                    TestStatus::Regressed => "✗",
+                    TestStatus::Broken => "⚠",
+                };
+
+                let resolution_symbol = match resolution {
+                    NaturalResolution::Exact => "=",
+                    NaturalResolution::Upgraded => "↑",
+                };
+
+                format!("{} {}{}", status_icon, resolution_symbol, version)
+            }
+            OfferedCell::Forced { status, version } => {
+                let status_icon = match status {
+                    TestStatus::Passed => "✓",
+                    TestStatus::Regressed => "✗",
+                    TestStatus::Broken => "⚠",
+                };
+
+                // Forced always shows ≠ with [≠→!] suffix
+                format!("{} ≠{} [≠→!]", status_icon, version)
+            }
+        }
+    }
+}
 
 #[derive(Default, Debug)]
 pub struct Summary {
@@ -211,6 +318,7 @@ fn get_status_info(data: &TestResultData) -> (&'static str, Color) {
 }
 
 /// Print a colored table row (legacy format)
+#[allow(dead_code)]
 fn print_colored_row(status: &str, name: &str, depends_on: &str, testing: &str,
                      duration: &str, color: Color) {
     // Print the row with coloring
@@ -268,17 +376,550 @@ fn classify_version_outcome(outcome: &VersionTestOutcome, baseline: Option<&Vers
     }
 }
 
-/// Print a console table showing all test results
+/// Build table rows from multi-version test results
+fn build_table_rows(result: &TestResult, this_version: &str) -> Vec<TableRow> {
+    let mut rows = Vec::new();
+
+    let name_with_version = format!("{} {}", result.rev_dep.name, result.rev_dep.vers);
+
+    match &result.data {
+        TestResultData::MultiVersion(ref outcomes) => {
+            // First outcome is always baseline
+            let baseline = outcomes.first();
+
+            for (idx, outcome) in outcomes.iter().enumerate() {
+                let is_baseline = idx == 0;
+
+                // Determine status
+                let status = if is_baseline {
+                    if outcome.result.is_success() {
+                        VersionStatus::Passed
+                    } else {
+                        VersionStatus::Broken
+                    }
+                } else {
+                    classify_version_outcome(outcome, baseline)
+                };
+
+                let offered_cell = if is_baseline {
+                    OfferedCell::Baseline
+                } else {
+                    // Check if version was actually tested or skipped by cargo
+                    let was_skipped = match (&outcome.result.expected_version, &outcome.result.actual_version) {
+                        (Some(expected), Some(actual)) if expected != actual && !outcome.result.forced_version => {
+                            // Cargo resolved to a different version than we offered (not forced)
+                            true
+                        }
+                        _ => false
+                    };
+
+                    if was_skipped {
+                        // Format version string
+                        let version = format_version_with_this(&outcome.version_source, this_version);
+                        // Determine resolution symbol (likely upgraded since cargo chose a different version)
+                        let resolution = determine_natural_resolution(&outcome.result);
+                        OfferedCell::SkippedWithVersion { resolution, version }
+                    } else {
+                        // Format version string
+                        let version = format_version_with_this(&outcome.version_source, this_version);
+
+                        let test_status = match status {
+                            VersionStatus::Passed => TestStatus::Passed,
+                            VersionStatus::Regressed => TestStatus::Regressed,
+                            VersionStatus::Broken => TestStatus::Broken,
+                        };
+
+                        if outcome.result.forced_version {
+                            // Forced version: always shows ≠ with [≠→!]
+                            OfferedCell::Forced {
+                                status: test_status,
+                                version,
+                            }
+                        } else {
+                            // Natural resolution: determine if exact or upgraded
+                            let resolution = determine_natural_resolution(&outcome.result);
+
+                            OfferedCell::Natural {
+                                status: test_status,
+                                resolution,
+                                version,
+                            }
+                        }
+                    }
+                };
+
+                // Format spec
+                let spec = if outcome.result.forced_version {
+                    // For forced versions, show → =version
+                    outcome.result.expected_version.as_ref()
+                        .map(|v| format!("→ ={}", v))
+                        .unwrap_or_else(|| "→ (forced)".to_string())
+                } else {
+                    // For natural versions, show original requirement
+                    outcome.result.original_requirement.as_ref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "".to_string())
+                };
+
+                // Format resolved version
+                let resolved = format_resolved_version(&outcome.result, &outcome.version_source);
+
+                // Result summary (status + ICT marks)
+                let result_status = match status {
+                    VersionStatus::Passed => "PASSED",
+                    VersionStatus::Regressed => "REGRESSED",
+                    VersionStatus::Broken => "BROKEN",
+                };
+                let ict_marks = outcome.result.format_ict_marks();
+                let result_str = format!("{} {}", result_status, ict_marks);
+
+                // Time
+                let time_str = format!("{:.1}s",
+                    outcome.result.fetch.duration.as_secs_f64()
+                    + outcome.result.check.as_ref().map(|c| c.duration.as_secs_f64()).unwrap_or(0.0)
+                    + outcome.result.test.as_ref().map(|t| t.duration.as_secs_f64()).unwrap_or(0.0));
+
+                // Color
+                let color = match status {
+                    VersionStatus::Passed => term::color::BRIGHT_GREEN,
+                    VersionStatus::Regressed => term::color::BRIGHT_RED,
+                    VersionStatus::Broken => term::color::BRIGHT_YELLOW,
+                };
+
+                // Error details (if failed)
+                let error_details = if !outcome.result.is_success() {
+                    extract_error_details(&outcome.result)
+                } else {
+                    Vec::new()
+                };
+
+                rows.push(TableRow {
+                    offered: offered_cell,
+                    spec,
+                    resolved,
+                    dependent: name_with_version.clone(),
+                    result: result_str,
+                    time: time_str,
+                    color,
+                    error_details,
+                    multi_version_rows: Vec::new(),  // TODO: populate for actual multi-version in tree
+                });
+            }
+        }
+        TestResultData::Skipped(_) => {
+            rows.push(TableRow {
+                offered: OfferedCell::SkippedNoVersion,
+                spec: "".to_string(),
+                resolved: "".to_string(),
+                dependent: name_with_version,
+                result: "(skipped)".to_string(),
+                time: "".to_string(),
+                color: term::color::BRIGHT_CYAN,
+                error_details: Vec::new(),
+                multi_version_rows: Vec::new(),
+            });
+        }
+        TestResultData::Error(_) => {
+            rows.push(TableRow {
+                offered: OfferedCell::SkippedNoVersion,
+                spec: "".to_string(),
+                resolved: "ERROR".to_string(),
+                dependent: name_with_version,
+                result: "ERROR".to_string(),
+                time: "".to_string(),
+                color: term::color::BRIGHT_MAGENTA,
+                error_details: Vec::new(),
+                multi_version_rows: Vec::new(),
+            });
+        }
+        _ => {
+            // All other result types (Broken, Passed, Regressed) have been migrated to MultiVersion
+            // This branch should never be reached after migration
+        }
+    }
+
+    rows
+}
+
+/// Determine natural resolution outcome (exact or upgraded)
+/// Only called for non-forced versions
+fn determine_natural_resolution(result: &ThreeStepResult) -> NaturalResolution {
+    match (&result.expected_version, &result.actual_version) {
+        (Some(expected), Some(actual)) => {
+            if expected == actual {
+                NaturalResolution::Exact
+            } else {
+                // Natural cargo resolution chose a different (newer) version
+                NaturalResolution::Upgraded
+            }
+        }
+        _ => NaturalResolution::Exact,  // Default if we can't verify
+    }
+}
+
+/// Format version string, using "this(version)" for local versions
+fn format_version_with_this(version_source: &VersionSource, this_version: &str) -> String {
+    match version_source {
+        VersionSource::Local(_) => format!("this({})", this_version),
+        VersionSource::Published(v) => v.clone(),
+    }
+}
+
+/// Format resolved version with source icon
+fn format_resolved_version(result: &ThreeStepResult, version_source: &VersionSource) -> String {
+    let version = result.actual_version.as_ref()
+        .or(result.expected_version.as_ref())
+        .map(|v| v.as_str())
+        .unwrap_or("?");
+
+    let icon = match version_source {
+        VersionSource::Local(_) => "📁",
+        VersionSource::Published(_) => "📦",
+    };
+
+    format!("{} {}", version, icon)
+}
+
+/// Extract error details from a failed test result
+fn extract_error_details(result: &ThreeStepResult) -> Vec<String> {
+    let mut details = Vec::new();
+
+    if let Some(failed) = result.first_failure() {
+        if !failed.diagnostics.is_empty() {
+            let errors: Vec<_> = failed.diagnostics.iter()
+                .filter(|d| d.level.is_error())
+                .take(3)  // Limit to first 3 errors
+                .collect();
+
+            for diag in errors {
+                let msg = if diag.message.len() > 70 {
+                    format!("{}...", &diag.message[..67])
+                } else {
+                    diag.message.clone()
+                };
+
+                let error_line = if let Some(code) = &diag.code {
+                    format!("• error[{}]: {}", code, msg)
+                } else {
+                    format!("• error: {}", msg)
+                };
+
+                details.push(error_line);
+
+                // Add location if available
+                if let Some(span) = &diag.primary_span {
+                    details.push(format!("   --> {}:{}:{}", span.file_name, span.line, span.column));
+                }
+            }
+        }
+    }
+
+    details
+}
+
+/// Print table header (for real-time printing mode)
+pub fn print_table_header(crate_name: &str, display_version: &str, total_deps: usize) {
+    println!("\n{}", "=".repeat(120));
+    println!("Testing {} reverse dependencies of {}", total_deps, crate_name);
+    println!("  this = {} (your work-in-progress version)", display_version);
+    println!("{}", "=".repeat(120));
+    println!();
+
+    // Column widths
+    let w_offered = 20;
+    let w_spec = 10;
+    let w_resolved = 17;
+    let w_dependent = 25;
+    let w_result = 21;
+
+    // Print table header
+    println!("┌{:─<w_offered$}┬{:─<w_spec$}┬{:─<w_resolved$}┬{:─<w_dependent$}┬{:─<w_result$}┐",
+             "", "", "", "", "",
+             w_offered=w_offered, w_spec=w_spec, w_resolved=w_resolved,
+             w_dependent=w_dependent, w_result=w_result);
+
+    println!("│{:^w_offered$}│{:^w_spec$}│{:^w_resolved$}│{:^w_dependent$}│{:^w_result$}│",
+             "Offered", "Spec", "Resolved", "Dependent", "Result         Time",
+             w_offered=w_offered, w_spec=w_spec, w_resolved=w_resolved,
+             w_dependent=w_dependent, w_result=w_result);
+
+    println!("├{:─<w_offered$}┼{:─<w_spec$}┼{:─<w_resolved$}┼{:─<w_dependent$}┼{:─<w_result$}┤",
+             "", "", "", "", "",
+             w_offered=w_offered, w_spec=w_spec, w_resolved=w_resolved,
+             w_dependent=w_dependent, w_result=w_result);
+}
+
+/// Print a single test result block (for real-time printing)
+pub fn print_result_block(result: &TestResult, display_version: &str) {
+    let w_offered = 20;
+    let w_spec = 10;
+    let w_resolved = 17;
+    let w_dependent = 25;
+    let w_result = 21;
+
+    let rows = build_table_rows(result, display_version);
+    let num_rows = rows.len();
+
+    for (idx, row) in rows.iter().enumerate() {
+        let is_last = idx == num_rows - 1;
+        print_table_row(&row, w_offered, w_spec, w_resolved, w_dependent, w_result, is_last);
+    }
+}
+
+/// Print table footer
+pub fn print_table_footer() {
+    let w_offered = 20;
+    let w_spec = 10;
+    let w_resolved = 17;
+    let w_dependent = 25;
+    let w_result = 21;
+
+    println!("└{:─<w_offered$}┴{:─<w_spec$}┴{:─<w_resolved$}┴{:─<w_dependent$}┴{:─<w_result$}┘",
+             "", "", "", "", "",
+             w_offered=w_offered, w_spec=w_spec, w_resolved=w_resolved,
+             w_dependent=w_dependent, w_result=w_result);
+    println!();
+}
+
+/// Print a horizontal separator line between dependents
+pub fn print_separator_line() {
+    let w_offered = 20;
+    let w_spec = 10;
+    let w_resolved = 17;
+    let w_dependent = 25;
+    let w_result = 21;
+
+    println!("├{:─<w_offered$}┼{:─<w_spec$}┼{:─<w_resolved$}┼{:─<w_dependent$}┼{:─<w_result$}┤",
+             "", "", "", "", "",
+             w_offered=w_offered, w_spec=w_spec, w_resolved=w_resolved,
+             w_dependent=w_dependent, w_result=w_result);
+}
+
+/// Print a console table showing all test results (new five-column format)
+pub fn print_console_table_v2(results: &[TestResult], crate_name: &str, display_version: &str) {
+    if results.is_empty() {
+        println!("No reverse dependencies tested.");
+        return;
+    }
+
+    // Print header
+    print_table_header(crate_name, display_version, results.len());
+
+    // Print each result with separators between dependents
+    for (i, result) in results.iter().enumerate() {
+        if i > 0 {
+            // Print separator between each dependent
+            print_separator_line();
+        }
+        print_result_block(result, display_version);
+    }
+
+    // Print footer
+    print_table_footer();
+
+    // Print summary
+    let summary = summarize_results(results);
+    println!("Summary:");
+    println!("  ✓ Passed:    {}", summary.passed);
+    println!("  ✗ Regressed: {}", summary.regressed);
+    println!("  ⚠ Broken:    {}", summary.broken);
+    println!("  ⊘ Skipped:   {}", summary.skipped);
+    println!("  ⚡ Error:     {}", summary.error);
+    println!("  ━━━━━━━━━━━━━");
+    println!("  Total:       {}", summary.total());
+    println!();
+}
+
+/// Print a single table row with optional error details and multi-version rows
+fn print_table_row(row: &TableRow, w_offered: usize, w_spec: usize, w_resolved: usize, w_dependent: usize, w_result: usize, is_last: bool) {
+    // Main row
+    let offered_str = row.offered.format();
+    let offered_display = truncate_with_padding(&offered_str, w_offered - 2);
+    let spec_display = truncate_with_padding(&row.spec, w_spec - 2);
+    let resolved_display = truncate_with_padding(&row.resolved, w_resolved - 2);
+    let dependent_display = truncate_with_padding(&row.dependent, w_dependent - 2);
+    let result_display = format!("{:>12} {:>5}", row.result, row.time);
+    let result_display = truncate_with_padding(&result_display, w_result - 2);
+
+    // Print main row with color
+    // Note: strings are already padded by truncate_with_padding(), so we don't use width specifiers
+    if let Some(ref mut t) = term::stdout() {
+        let _ = t.fg(row.color);
+        let _ = write!(t, "│ {} │", offered_display);
+        let _ = write!(t, " {} │", spec_display);
+        let _ = write!(t, " {} │", resolved_display);
+        let _ = write!(t, " {} │", dependent_display);
+        let _ = write!(t, " {} │", result_display);
+        let _ = t.reset();
+        println!();
+    } else {
+        println!("│ {} │ {} │ {} │ {} │ {} │",
+                 offered_display, spec_display, resolved_display, dependent_display, result_display);
+    }
+
+    // Print error details with dropped-panel border (if any)
+    if !row.error_details.is_empty() {
+        // Error text row format: │{w_offered}│ {error_text} │
+        // Total: 1 + w_offered + 1 + 1 + error_text + 1 + 1 = 99
+        // So: error_text = 99 - 1 - w_offered - 1 - 1 - 1 - 1 = 74
+        let error_text_width = 99 - 1 - w_offered - 1 - 1 - 1 - 1;
+
+        // Top border with corners dropping to create panel
+        // Format: │{w_offered}├{col2_dashes}┘{spaces}└{col4_dashes}┘{w_result}│
+        // Middle section: 99 - 1 - w_offered - w_result - 1 = 56
+        // Contains: ├ (1) + col2_dashes + ┘ (1) + spaces + └ (1) + col4_dashes + ┘ (1) = 56
+        // So: col2_dashes + spaces + col4_dashes = 52
+        let corner1_width = w_spec;  // 10
+        let corner2_width = w_dependent;  // 25
+        let padding_width = 52 - corner1_width - corner2_width;  // 17
+
+        println!("│{:w_offered$}├{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│",
+                 "", "", "", "", "",
+                 w_offered = w_offered, corner1 = corner1_width,
+                 padding = padding_width, corner2 = corner2_width, w_result = w_result);
+
+        // Error detail lines - span columns 2-5, only outer borders
+        for error_line in &row.error_details {
+            let truncated = truncate_with_padding(error_line, error_text_width);
+            println!("│{:w_offered$}│ {} │",
+                     "", truncated,
+                     w_offered = w_offered);
+        }
+
+        // Restore full border (only if there are more rows to follow)
+        if !is_last {
+            println!("│{:w_offered$}├{:─<w_spec$}┬{:─<w_resolved$}┬{:─<w_dependent$}┬{:─<w_result$}┤",
+                     "", "", "", "", "",
+                     w_offered = w_offered, w_spec = w_spec, w_resolved = w_resolved,
+                     w_dependent = w_dependent, w_result = w_result);
+        }
+    }
+
+    // Print multi-version rows with ├─ prefixes (if any)
+    if !row.multi_version_rows.is_empty() {
+        for mv_row in &row.multi_version_rows {
+            let spec_display = format!("├─ {}", mv_row.spec);
+            let spec_display = truncate_with_padding(&spec_display, w_spec - 2);
+            let resolved_display = format!("├─ {}", mv_row.resolved);
+            let resolved_display = truncate_with_padding(&resolved_display, w_resolved - 2);
+            let dependent_display = format!("├─ {}", mv_row.dependent);
+            let dependent_display = truncate_with_padding(&dependent_display, w_dependent - 2);
+
+            println!("│{:w$}│ {} │ {} │ {} │{:w_result$}│",
+                     "", spec_display, resolved_display, dependent_display, "",
+                     w = w_offered, w_result = w_result);
+        }
+    }
+}
+
+/// Truncate string to fit width, adding "..." if truncated
+/// Handles UTF-8 character boundaries correctly
+fn truncate_str(s: &str, max_width: usize) -> String {
+    // Count characters, not bytes, to handle UTF-8
+    let char_count = s.chars().count();
+
+    if char_count <= max_width {
+        s.to_string()
+    } else if max_width >= 3 {
+        let truncate_at = max_width - 3;
+        let truncated: String = s.chars().take(truncate_at).collect();
+        format!("{}...", truncated)
+    } else {
+        let truncated: String = s.chars().take(max_width).collect();
+        truncated
+    }
+}
+
+/// Count the display width of a string, accounting for wide Unicode characters
+/// Emojis like 📦 and 📁 take 2 columns, box-drawing is 1, other symbols vary
+fn display_width(s: &str) -> usize {
+    s.chars().map(|c| {
+        match c {
+            // Emojis that are definitely 2 columns wide (Wide in East Asian Width)
+            '📦' | '📁' | '⚡' => 2,
+            // Unicode symbols - 1 column in Western terminals (Neutral/Narrow)
+            '✓' | '✗' | '⊘' | '⚠' => 1,
+            // Box-drawing characters - 1 column (Ambiguous, but 1 in Western terminals)
+            '━' | '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' => 1,
+            // Most other characters are 1 column
+            _ => {
+                // Additional check for emoji ranges
+                let code = c as u32;
+                if (code >= 0x1F300 && code <= 0x1F9FF) || // Misc Symbols and Pictographs
+                   (code >= 0x2600 && code <= 0x26FF) {    // Misc Symbols (includes ⚡)
+                    // Most in this range are wide, but we've handled exceptions above
+                    2
+                } else {
+                    1
+                }
+            }
+        }
+    }).sum()
+}
+
+/// Truncate and pad string to exact display width
+/// Accounts for wide Unicode characters that take 2 columns
+fn truncate_with_padding(s: &str, width: usize) -> String {
+    let display_w = display_width(s);
+
+    if display_w >= width {
+        // Need to truncate - rebuild string char by char until we hit width
+        let mut result = String::new();
+        let mut current_width = 0;
+
+        for c in s.chars() {
+            let char_width = match c {
+                '📦' | '📁' | '⚡' => 2,
+                '✓' | '✗' | '⊘' | '⚠' => 1,
+                '━' | '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' => 1,
+                _ => {
+                    let code = c as u32;
+                    if (code >= 0x1F300 && code <= 0x1F9FF) || (code >= 0x2600 && code <= 0x26FF) {
+                        2
+                    } else {
+                        1
+                    }
+                }
+            };
+
+            if current_width + char_width > width {
+                break;
+            }
+
+            result.push(c);
+            current_width += char_width;
+        }
+
+        // If we have room, add "..."
+        if width >= 3 && current_width < width - 3 {
+            result.push_str("...");
+        }
+
+        // Pad to exact width
+        let final_width = display_width(&result);
+        if final_width < width {
+            result.push_str(&" ".repeat(width - final_width));
+        }
+
+        result
+    } else {
+        // Pad with spaces to reach the width
+        let padding = width - display_w;
+        format!("{}{}", s, " ".repeat(padding))
+    }
+}
+
+/// Print a console table showing all test results (legacy format)
 pub fn print_console_table(results: &[TestResult], crate_name: &str, display_version: &str) {
     println!("\n{}", "=".repeat(110));
 
-    // Count total rows (including multi-version expansions)
-    let mut total_rows = 0;
+    // Count total rows (including multi-version expansions) - currently unused but may be needed for pagination
+    let mut _total_rows = 0;
     for result in results {
         if let TestResultData::MultiVersion(ref outcomes) = result.data {
-            total_rows += outcomes.len();
+            _total_rows += outcomes.len();
         } else {
-            total_rows += 1;
+            _total_rows += 1;
         }
     }
 
@@ -291,10 +932,6 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, display_ver
         println!("No reverse dependencies tested.");
         return;
     }
-
-    // Print legend for multi-version ICT display
-    println!("Legend: I=Install (cargo fetch), C=Check (cargo check), T=Test (cargo test)");
-    println!();
 
     // Print table header with ICT column
     // Status (12) | Dependent (26) | Version (14) | ICT (5) | Duration (10)
@@ -320,8 +957,8 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, display_ver
             TestResultData::Regressed(four_step) |
             TestResultData::Broken(four_step) => {
                 let (status_label, color) = get_status_info(&result.data);
-                let depends_on = format_depends_on(&result.rev_dep.resolved_version, four_step);
-                let testing = format_testing(four_step);
+                let _depends_on = format_depends_on(&result.rev_dep.resolved_version, four_step);
+                let _testing = format_testing(four_step);
                 let duration = format_total_duration(four_step);
 
                 // For legacy 4-step, show in old format (combine depends_on and testing)
@@ -343,7 +980,11 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, display_ver
                 let baseline = outcomes.first();
 
                 for (idx, outcome) in outcomes.iter().enumerate() {
-                    let version_label = outcome.version_source.label();
+                    let mut version_label = outcome.version_source.label();
+                    // Add asterisk if this version was forced (outside semver requirements)
+                    if outcome.result.forced_version {
+                        version_label = format!("{}*", version_label);
+                    }
                     let ict_marks = outcome.result.format_ict_marks();
                     let duration = format!("{:.1}s", outcome.result.fetch.duration.as_secs_f64()
                         + outcome.result.check.as_ref().map(|c| c.duration.as_secs_f64()).unwrap_or(0.0)
@@ -1021,5 +1662,96 @@ mod tests {
             diagnostics: Vec::new(),
         };
         assert_eq!(format_step(&failure), "✗ 1.5s");
+    }
+
+    #[test]
+    fn test_error_row_width_calculation() {
+        // Column widths from the actual code
+        let w_offered = 20;
+        let w_spec = 10;
+        let w_resolved = 17;
+        let w_dependent = 25;
+        let w_result = 21;
+
+        // Expected total width of any row (from border line)
+        // ┌{20}┬{10}┬{17}┬{25}┬{21}┐
+        let expected_total = 1 + w_offered + 1 + w_spec + 1 + w_resolved + 1 + w_dependent + 1 + w_result + 1;
+        assert_eq!(expected_total, 99, "Border line should be 99 chars");
+
+        // Current buggy calculation from line 776
+        let detail_width_buggy = w_spec + w_resolved + w_dependent + w_result + 6;
+        println!("Buggy detail_width: {}", detail_width_buggy);
+        // = 10 + 17 + 25 + 21 + 6 = 79
+
+        // Current corner line calculation from lines 783-790
+        let corner1_width = w_spec;  // 10
+        let corner2_width = w_dependent;  // 25
+        let padding_width = w_resolved + 2;  // 17 + 2 = 19
+
+        // Line format: │{w_offered}├{corner1}┘{padding}└{corner2}┘{w_result}│
+        let corner_line_width_buggy =
+            1 + // left │
+            w_offered + // 20 spaces
+            1 + // ├
+            corner1_width + 1 + // dashes + ┘ (10 + 1 = 11)
+            padding_width + // spaces (19)
+            1 + // └
+            corner2_width + 1 + // dashes + ┘ (25 + 1 = 26)
+            w_result + // 21 spaces
+            1; // right │
+
+        println!("Buggy corner line width: {}", corner_line_width_buggy);
+        // = 1 + 20 + 1 + 11 + 19 + 1 + 26 + 21 + 1 = 101 (WRONG! Should be 99)
+
+        assert_ne!(corner_line_width_buggy, 99, "Current calculation produces 101 chars instead of 99");
+
+        // Correct calculation
+        // The middle section (between col1 and col5) should be:
+        // 99 - 1 (│) - 20 (col1) - 21 (col5) - 1 (│) = 56 chars
+        let middle_section_width = 99 - 1 - w_offered - w_result - 1;
+        println!("Middle section should be: {} chars", middle_section_width);
+        assert_eq!(middle_section_width, 56);
+
+        // The middle section contains:
+        // ├{col2_dashes}┘{spaces}└{col4_dashes}┘
+        // We need: 1 + col2_dashes + 1 + spaces + 1 + col4_dashes + 1 = 56
+        // So: col2_dashes + spaces + col4_dashes = 56 - 4 = 52
+
+        // Natural choice: col2_dashes = w_spec, col4_dashes = w_dependent
+        // So: spaces = 52 - w_spec - w_dependent = 52 - 10 - 25 = 17
+        let correct_padding = 52 - w_spec - w_dependent;
+        println!("Correct padding width: {}", correct_padding);
+        assert_eq!(correct_padding, 17);
+
+        // Verify the corrected line
+        let corner_line_width_correct =
+            1 + // │
+            w_offered + // 20
+            1 + // ├
+            w_spec + 1 + // 10 + 1 = 11
+            correct_padding + // 17
+            1 + // └
+            w_dependent + 1 + // 25 + 1 = 26
+            w_result + // 21
+            1; // │
+        println!("Correct corner line width: {}", corner_line_width_correct);
+        assert_eq!(corner_line_width_correct, 99, "Corrected calculation should produce 99 chars");
+    }
+
+    #[test]
+    fn test_error_text_row_width() {
+        let w_offered = 20;
+        let w_result = 21;
+
+        // Error text row format: │{w_offered}│ {error_text} │
+        // Total: 1 + 20 + 1 + 1 + error_text + 1 + 1 = 99
+        // So: error_text = 99 - 1 - 20 - 1 - 1 - 1 - 1 = 74
+
+        let error_text_width = 99 - 1 - w_offered - 1 - 1 - 1 - 1;
+        println!("Error text width should be: {}", error_text_width);
+        assert_eq!(error_text_width, 74);
+
+        // Current buggy calculation claims detail_width = 79, minus 2 for padding = 77
+        // That's 3 chars too many!
     }
 }

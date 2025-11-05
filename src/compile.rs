@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::env;
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
+// TempDir not needed since we use persistent staging directories
 use log::debug;
 use crate::error_extract::{Diagnostic, parse_cargo_json};
 
@@ -83,49 +83,74 @@ fn verify_dependency_version(
         .current_dir(crate_path)
         .output()
         .ok()?;
+    // if output.status.success() {
+    //     let stdout = String::from_utf8_lossy(&output.stdout);
+    //     if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&stdout) {
+    //         // Check resolve.nodes for the dependency
+    //         if let Some(resolve) = metadata.get("resolve") {
+    //             if let Some(nodes) = resolve.get("nodes").and_then(|n| n.as_array()) {
+    //                 for node in nodes {
+    //                     if let Some(deps) = node.get("deps").and_then(|d| d.as_array()) {
+    //                         for dep in deps {
+    //                             if let Some(name) = dep.get("name").and_then(|n| n.as_str()) {
+    //                                 if name == dep_name {
+    //                                     if let Some(pkg) = dep.get("pkg").and_then(|p| p.as_str()) {
+    //                                         // pkg format: "rgb 0.8.52 (path+file://...)" or "rgb 0.8.52 (registry+...)"
+    //                                         let parts: Vec<&str> = pkg.split_whitespace().collect();
+    //                                         if parts.len() >= 2 {
+    //                                             let version = parts[1].to_string();
+    //                                             debug!("Found {} version: {}", dep_name, version);
+    //                                             return Some(version);
+    //                                         }
+    //                                     }
+    //                                 }
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        debug!("cargo metadata failed: {}", stderr.trim());
+        return None;
+    }
 
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            // Check resolve.nodes for the dependency
-            if let Some(resolve) = metadata.get("resolve") {
-                if let Some(nodes) = resolve.get("nodes").and_then(|n| n.as_array()) {
-                    for node in nodes {
-                        if let Some(deps) = node.get("deps").and_then(|d| d.as_array()) {
-                            for dep in deps {
-                                if let Some(name) = dep.get("name").and_then(|n| n.as_str()) {
-                                    if name == dep_name {
-                                        if let Some(pkg) = dep.get("pkg").and_then(|p| p.as_str()) {
-                                            // pkg format: "rgb 0.8.52 (path+file://...)" or "rgb 0.8.52 (registry+...)"
-                                            let parts: Vec<&str> = pkg.split_whitespace().collect();
-                                            if parts.len() >= 2 {
-                                                let version = parts[1].to_string();
-                                                debug!("Found {} version: {}", dep_name, version);
-                                                return Some(version);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let metadata = match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("Failed to parse metadata JSON: {}", e);
+            return None;
+        }
+    };
+
+    // Check packages array for the dependency
+    let packages = match metadata.get("packages").and_then(|p| p.as_array()) {
+        Some(p) => p,
+        None => {
+            debug!("No 'packages' in metadata");
+            return None;
+        }
+    };
+
+    // Find the package with matching name
+    for pkg in packages {
+        if let Some(name) = pkg.get("name").and_then(|n| n.as_str()) {
+            if name == dep_name {
+                if let Some(version) = pkg.get("version").and_then(|v| v.as_str()) {
+                    debug!("✓ Verified {} version: {}", dep_name, version);
+                    return Some(version.to_string());
                 }
             }
         }
     }
 
-    debug!("Could not verify {} version", dep_name);
+    debug!("Could not find {} in dependency graph", dep_name);
     None
 }
 
-/// Compile a crate at the given path with an optional dependency override
-///
-/// # Arguments
-/// * `crate_path` - Path to the crate to compile
-/// * `step` - Whether to run fetch, check, or test
-/// * `override_spec` - Optional override specification (crate_name, override_path)
-/// Modify Cargo.toml to use a specific version or path override
-fn modify_cargo_toml_dependency(
+/// Add [patch.crates-io] section to Cargo.toml to override a dependency
+/// This respects semver requirements - if the version doesn't match, cargo will fail
+fn add_cargo_patch(
     crate_path: &Path,
     dep_name: &str,
     override_path: &Path,
@@ -152,18 +177,76 @@ fn modify_cargo_toml_dependency(
     drop(file);
 
     // Parse as TOML
-    let mut doc: toml_edit::Document = content.parse()
+    let mut doc: toml_edit::DocumentMut = content.parse()
         .map_err(|e| format!("Failed to parse Cargo.toml: {}", e))?;
 
-    // Update dependency in all sections
+    // Add or update [patch.crates-io] section
+    let patch_section = doc.entry("patch").or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let patch_table = patch_section.as_table_mut()
+        .ok_or_else(|| "patch is not a table".to_string())?;
+
+    let crates_io_section = patch_table.entry("crates-io").or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let crates_io_table = crates_io_section.as_table_mut()
+        .ok_or_else(|| "patch.crates-io is not a table".to_string())?;
+
+    // Add the patch entry for our dependency
+    let mut patch_entry = toml_edit::InlineTable::new();
+    patch_entry.insert("path", override_path.display().to_string().into());
+    crates_io_table.insert(dep_name, toml_edit::Item::Value(toml_edit::Value::InlineTable(patch_entry)));
+
+    debug!("Adding [patch.crates-io] for {} -> {:?}", dep_name, override_path);
+
+    // Write back
+    let mut file = fs::File::create(&cargo_toml_path)
+        .map_err(|e| format!("Failed to create Cargo.toml: {}", e))?;
+    file.write_all(doc.to_string().as_bytes())
+        .map_err(|e| format!("Failed to write Cargo.toml: {}", e))?;
+
+    debug!("Added patch to Cargo.toml: {} -> {}", dep_name, override_path.display());
+    Ok(())
+}
+
+/// Force-modify dependency specification to use exact path, bypassing semver
+/// This is used when --force-versions is specified
+fn force_dependency_spec(
+    crate_path: &Path,
+    dep_name: &str,
+    override_path: &Path,
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+
+    // Convert to absolute path
+    let override_path = if override_path.is_absolute() {
+        override_path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|e| format!("Failed to get current dir: {}", e))?
+            .join(override_path)
+    };
+
+    let cargo_toml_path = crate_path.join("Cargo.toml");
+    let mut content = String::new();
+
+    // Read original Cargo.toml
+    let mut file = fs::File::open(&cargo_toml_path)
+        .map_err(|e| format!("Failed to open Cargo.toml: {}", e))?;
+    file.read_to_string(&mut content)
+        .map_err(|e| format!("Failed to read Cargo.toml: {}", e))?;
+    drop(file);
+
+    // Parse as TOML
+    let mut doc: toml_edit::DocumentMut = content.parse()
+        .map_err(|e| format!("Failed to parse Cargo.toml: {}", e))?;
+
+    // Update dependency in all sections (force mode - replaces the spec entirely)
     let sections = vec!["dependencies", "dev-dependencies", "build-dependencies"];
 
     for section in sections {
         if let Some(deps) = doc.get_mut(section).and_then(|s| s.as_table_mut()) {
             if let Some(dep) = deps.get_mut(dep_name) {
-                debug!("Updating {} in [{}] to path {:?}", dep_name, section, override_path);
+                debug!("Force-replacing {} in [{}] with path {:?}", dep_name, section, override_path);
 
-                // Replace with path override
+                // Replace with path override (no version constraint)
                 let mut new_dep = toml_edit::InlineTable::new();
                 new_dep.insert("path", override_path.display().to_string().into());
                 *dep = toml_edit::Item::Value(toml_edit::Value::InlineTable(new_dep));
@@ -177,7 +260,7 @@ fn modify_cargo_toml_dependency(
     file.write_all(doc.to_string().as_bytes())
         .map_err(|e| format!("Failed to write Cargo.toml: {}", e))?;
 
-    debug!("Modified Cargo.toml to use path override: {}", override_path.display());
+    debug!("Force-replaced {} dependency spec with path: {}", dep_name, override_path.display());
     Ok(())
 }
 
@@ -325,6 +408,10 @@ pub struct ThreeStepResult {
     pub actual_version: Option<String>,
     /// Expected version being tested
     pub expected_version: Option<String>,
+    /// Whether this version was forced (bypassed semver requirements)
+    pub forced_version: bool,
+    /// Original requirement from dependent (e.g., "^0.8.52"), if known
+    pub original_requirement: Option<String>,
 }
 
 impl ThreeStepResult {
@@ -497,34 +584,56 @@ pub fn run_three_step_ict(
     skip_check: bool,
     skip_test: bool,
     expected_version: Option<String>,
+    force_versions: bool,
+    original_requirement: Option<String>,
 ) -> Result<ThreeStepResult, String> {
-    debug!("running three-step ICT for {:?}", crate_path);
+    debug!("running three-step ICT for {:?} (force={}, expected_version={:?})", crate_path, force_versions, expected_version);
 
-    // Setup: Delete Cargo.lock, backup and modify Cargo.toml if override is provided
-    let backup_path = if let Some(override_path) = override_path {
-        let lock_file = crate_path.join("Cargo.lock");
-        if lock_file.exists() {
-            debug!("Deleting Cargo.lock to force dependency resolution");
-            fs::remove_file(&lock_file)
-                .map_err(|e| format!("Failed to remove Cargo.lock: {}", e))?;
+    // Always restore Cargo.toml from original backup to prevent contamination
+    restore_cargo_toml(crate_path)?;
+
+    // Always delete Cargo.lock to force fresh dependency resolution
+    let lock_file = crate_path.join("Cargo.lock");
+    if lock_file.exists() {
+        debug!("Deleting Cargo.lock to force dependency resolution");
+        fs::remove_file(&lock_file)
+            .map_err(|e| format!("Failed to remove Cargo.lock: {}", e))?;
+    }
+
+    // Setup: Choose patching strategy based on mode
+    let (backup_path, override_path_buf) = if let Some(override_path) = override_path {
+        if force_versions {
+            // FORCE MODE: Must modify Cargo.toml to bypass semver
+            // Backup Cargo.toml before modification
+            let cargo_toml = crate_path.join("Cargo.toml");
+            let backup = crate_path.join(".Cargo.toml.backup");
+            fs::copy(&cargo_toml, &backup)
+                .map_err(|e| format!("Failed to backup Cargo.toml: {}", e))?;
+
+            // Replace dependency spec directly (bypasses semver)
+            force_dependency_spec(crate_path, base_crate_name, override_path)?;
+
+            (Some(backup), None) // Don't use --config when we modified Cargo.toml
+        } else {
+            // PATCH MODE: Use --config flag (clean, no file modifications)
+            // Build override_spec for --config flag
+            let abs_path = if override_path.is_absolute() {
+                override_path.to_path_buf()
+            } else {
+                env::current_dir()
+                    .map_err(|e| format!("Failed to get current directory: {}", e))?
+                    .join(override_path)
+            };
+
+            debug!("Using --config for patch mode with override_path={:?}, abs_path={:?}", override_path, abs_path);
+            (None, Some(abs_path)) // Use --config, no backup needed
         }
-
-        // Backup Cargo.toml
-        let cargo_toml = crate_path.join("Cargo.toml");
-        let backup = crate_path.join(".Cargo.toml.backup");
-        fs::copy(&cargo_toml, &backup)
-            .map_err(|e| format!("Failed to backup Cargo.toml: {}", e))?;
-
-        // Modify Cargo.toml to use path override
-        modify_cargo_toml_dependency(crate_path, base_crate_name, override_path)?;
-
-        Some(backup)
     } else {
-        None
+        (None, None) // No override (baseline test)
     };
 
-    // Build override_spec for --config flag (now not used since we modify Cargo.toml directly)
-    let override_spec = None; // Don't use --config flag anymore
+    // Build override_spec for compile_crate calls
+    let override_spec = override_path_buf.as_ref().map(|path| (base_crate_name, path.as_path()));
 
     // Step 1: Fetch (always runs)
     let fetch = compile_crate(crate_path, CompileStep::Fetch, override_spec)?;
@@ -544,6 +653,8 @@ pub fn run_three_step_ict(
             test: None,
             actual_version,
             expected_version,
+            forced_version: force_versions,
+            original_requirement: original_requirement.clone(),
         });
     }
 
@@ -557,7 +668,9 @@ pub fn run_three_step_ict(
                 check: Some(result),
                 test: None,
                 actual_version: actual_version.clone(),
-                expected_version,
+                expected_version: expected_version.clone(),
+                forced_version: force_versions,
+                original_requirement: original_requirement.clone(),
             });
         }
         Some(result)
@@ -595,6 +708,8 @@ pub fn run_three_step_ict(
         test,
         actual_version,
         expected_version,
+        forced_version: force_versions,
+        original_requirement,
     })
 }
 

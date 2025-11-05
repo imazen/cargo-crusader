@@ -78,7 +78,7 @@ fn parse_dependent_spec(spec: &str) -> (String, Option<String>) {
 
 fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     // Phase 5: Check if we're doing multi-version testing
-    let use_multi_version = !args.test_versions.is_empty();
+    let use_multi_version = !args.test_versions.is_empty() || !args.force_versions.is_empty();
 
     // Build list of versions to test (Phase 5)
     let test_versions: Option<Vec<compile::VersionSource>> = if use_multi_version {
@@ -115,6 +115,40 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
                 }
                 _ => {
                     // Literal version string (supports hyphens like "0.8.2-alpha2")
+                    compile::VersionSource::Published(ver_str.clone())
+                }
+            };
+            versions.push(version_source);
+        }
+
+        // Add versions from --force-versions (these will be marked as forced in run_multi_version_test)
+        for ver_str in &args.force_versions {
+            let version_source = match ver_str.as_str() {
+                "latest" => {
+                    match resolve_latest_version(&config.crate_name, false) {
+                        Ok(ver) => {
+                            debug!("Resolved 'latest' to {}", ver);
+                            compile::VersionSource::Published(ver)
+                        }
+                        Err(e) => {
+                            status(&format!("Warning: Failed to resolve 'latest': {}", e));
+                            continue;
+                        }
+                    }
+                }
+                "latest-preview" | "latest-prerelease" => {
+                    match resolve_latest_version(&config.crate_name, true) {
+                        Ok(ver) => {
+                            debug!("Resolved 'latest-preview' to {}", ver);
+                            compile::VersionSource::Published(ver)
+                        }
+                        Err(e) => {
+                            status(&format!("Warning: Failed to resolve 'latest-preview': {}", e));
+                            continue;
+                        }
+                    }
+                }
+                _ => {
                     compile::VersionSource::Published(ver_str.clone())
                 }
             };
@@ -596,44 +630,93 @@ impl TestResult {
         TestResult { rev_dep, data }
     }
 
-    // Legacy constructors for backwards compatibility during migration
+    // Legacy constructors - now unified to return MultiVersion
     fn passed(rev_dep: RevDep, r1: CompileResult, r2: CompileResult) -> TestResult {
-        // Convert old-style to new FourStepResult
-        let four_step = compile::FourStepResult {
-            baseline_check: r1.clone(),
-            baseline_test: Some(r1),
-            override_check: Some(r2.clone()),
-            override_test: Some(r2),
+        // Convert to multi-version format with baseline + override
+        let baseline = VersionTestOutcome {
+            version_source: compile::VersionSource::Published(rev_dep.vers.to_string()),
+            result: compile::ThreeStepResult {
+                fetch: r1.clone(), // Use check result as placeholder for fetch
+                check: Some(r1.clone()),
+                test: Some(r1),
+                actual_version: rev_dep.resolved_version.clone(),
+                expected_version: rev_dep.resolved_version.clone(),
+                forced_version: false,
+                original_requirement: None,
+            },
         };
+
+        let override_version = VersionTestOutcome {
+            version_source: compile::VersionSource::Local(PathBuf::from(".")),
+            result: compile::ThreeStepResult {
+                fetch: r2.clone(),
+                check: Some(r2.clone()),
+                test: Some(r2),
+                actual_version: None, // WIP version
+                expected_version: None,
+                forced_version: false,
+                original_requirement: None,
+            },
+        };
+
         TestResult {
             rev_dep,
-            data: TestResultData::Passed(four_step)
+            data: TestResultData::MultiVersion(vec![baseline, override_version])
         }
     }
 
     fn regressed(rev_dep: RevDep, r1: CompileResult, r2: CompileResult) -> TestResult {
-        let four_step = compile::FourStepResult {
-            baseline_check: r1.clone(),
-            baseline_test: Some(r1),
-            override_check: Some(r2.clone()),
-            override_test: Some(r2),
+        // Same as passed, but r2 failed
+        let baseline = VersionTestOutcome {
+            version_source: compile::VersionSource::Published(rev_dep.vers.to_string()),
+            result: compile::ThreeStepResult {
+                fetch: r1.clone(),
+                check: Some(r1.clone()),
+                test: Some(r1),
+                actual_version: rev_dep.resolved_version.clone(),
+                expected_version: rev_dep.resolved_version.clone(),
+                forced_version: false,
+                original_requirement: None,
+            },
         };
+
+        let override_version = VersionTestOutcome {
+            version_source: compile::VersionSource::Local(PathBuf::from(".")),
+            result: compile::ThreeStepResult {
+                fetch: r2.clone(),
+                check: Some(r2.clone()),
+                test: Some(r2),
+                actual_version: None,
+                expected_version: None,
+                forced_version: false,
+                original_requirement: None,
+            },
+        };
+
         TestResult {
             rev_dep,
-            data: TestResultData::Regressed(four_step)
+            data: TestResultData::MultiVersion(vec![baseline, override_version])
         }
     }
 
     fn broken(rev_dep: RevDep, r: CompileResult) -> TestResult {
-        let four_step = compile::FourStepResult {
-            baseline_check: r,
-            baseline_test: None,
-            override_check: None,
-            override_test: None,
+        // Only baseline, which failed
+        let baseline = VersionTestOutcome {
+            version_source: compile::VersionSource::Published(rev_dep.vers.to_string()),
+            result: compile::ThreeStepResult {
+                fetch: r.clone(),
+                check: if r.step == compile::CompileStep::Check { Some(r) } else { None },
+                test: None,
+                actual_version: rev_dep.resolved_version.clone(),
+                expected_version: rev_dep.resolved_version.clone(),
+                forced_version: false,
+                original_requirement: None,
+            },
         };
+
         TestResult {
             rev_dep,
-            data: TestResultData::Broken(four_step)
+            data: TestResultData::MultiVersion(vec![baseline])
         }
     }
 
@@ -963,6 +1046,9 @@ fn run_multi_version_test(
         }
     };
 
+    // Extract the original requirement spec from the dependent's Cargo.toml
+    let original_requirement = extract_dependency_requirement(&rev_dep, &config.crate_name);
+
     // Reorder versions: baseline first, then --test-versions, then this/latest
     if let Some(ref baseline) = baseline_version {
         // Skip wildcard or star baselines
@@ -1015,8 +1101,9 @@ fn run_multi_version_test(
 
     // Run ICT tests for each version
     let mut outcomes = Vec::new();
-    for version_source in test_versions {
-        debug!("Testing {} against version {}", rev_dep.name, version_source.label());
+    debug!("Total versions to test: {}", test_versions.len());
+    for (idx, version_source) in test_versions.iter().enumerate() {
+        debug!("[{}/{}] Testing {} against version {}", idx + 1, test_versions.len(), rev_dep.name, version_source.label());
 
         // For published versions, download and unpack them for patching
         let override_path = match &version_source {
@@ -1027,6 +1114,7 @@ fn run_multi_version_test(
                 } else {
                     path.clone()
                 };
+                debug!("Using local version path: {:?}", dir_path);
                 Some(dir_path)
             }
             compile::VersionSource::Published(version) => {
@@ -1039,6 +1127,9 @@ fn run_multi_version_test(
                     Err(e) => {
                         status(&format!("Warning: Failed to download {} {}: {}", config.crate_name, version, e));
                         // Create a failed outcome
+                        let expected_version_str = parse_version_from_requirement(version);
+                        let is_forced = config.force_versions.contains(&expected_version_str);
+
                         let failed_result = compile::ThreeStepResult {
                             fetch: compile::CompileResult {
                                 step: compile::CompileStep::Fetch,
@@ -1051,7 +1142,9 @@ fn run_multi_version_test(
                             check: None,
                             test: None,
                             actual_version: None,
-                            expected_version: Some(parse_version_from_requirement(version)),
+                            expected_version: Some(expected_version_str),
+                            forced_version: is_forced,
+                            original_requirement: original_requirement.clone(),
                         };
                         outcomes.push(VersionTestOutcome {
                             version_source: version_source.clone(),
@@ -1066,12 +1159,14 @@ fn run_multi_version_test(
         let skip_check = false; // TODO: Get from args
         let skip_test = false;  // TODO: Get from args
 
-        // Determine expected version for verification
-        let expected_version = match &version_source {
+        // Determine expected version for verification and if it's forced
+        let (expected_version, is_forced) = match &version_source {
             compile::VersionSource::Published(v) => {
-                Some(parse_version_from_requirement(v))
+                let version_str = parse_version_from_requirement(v);
+                let forced = config.force_versions.contains(&version_str);
+                (Some(version_str), forced)
             }
-            compile::VersionSource::Local(_) => None, // Can't verify local versions
+            compile::VersionSource::Local(_) => (None, true), // Always force local versions (WIP, likely breaks semver)
         };
 
         match compile::run_three_step_ict(
@@ -1081,6 +1176,8 @@ fn run_multi_version_test(
             skip_check,
             skip_test,
             expected_version,
+            is_forced,
+            original_requirement.clone(),
         ) {
             Ok(result) => {
                 // Check for version mismatch
@@ -1183,7 +1280,19 @@ fn check_version_compatibility(rev_dep: &RevDep, config: &Config) -> Result<bool
 fn check_requirement(req: &toml::Value, wip_version: &Version) -> Result<bool, Error> {
     use semver::VersionReq;
 
-    let req_str = match req {
+    let req_str = extract_requirement_string(req);
+
+    debug!("Checking if version {} satisfies requirement '{}'", wip_version, req_str);
+
+    let version_req = VersionReq::parse(&req_str)
+        .map_err(|e| Error::SemverError(e))?;
+
+    Ok(version_req.matches(wip_version))
+}
+
+/// Extract the version requirement string from a toml dependency value
+fn extract_requirement_string(req: &toml::Value) -> String {
+    match req {
         toml::Value::String(s) => s.clone(),
         toml::Value::Table(t) => {
             // Handle { version = "1.0", features = [...] } format
@@ -1193,14 +1302,108 @@ fn check_requirement(req: &toml::Value, wip_version: &Version) -> Result<bool, E
                 .to_string()
         }
         _ => "*".to_string(),
+    }
+}
+
+/// Extract the original requirement spec for our crate from a dependent's Cargo.toml
+/// Returns the requirement string (e.g., "^0.8.52") if found
+fn extract_dependency_requirement(rev_dep: &RevDep, crate_name: &str) -> Option<String> {
+    debug!("Extracting dependency requirement for {} from {}", crate_name, rev_dep.name);
+
+    // Download and cache the dependent's .crate file
+    let crate_handle = match get_crate_handle(rev_dep) {
+        Ok(h) => h,
+        Err(e) => {
+            debug!("Failed to get crate handle for {}: {}", rev_dep.name, e);
+            return None;
+        }
     };
 
-    debug!("Checking if version {} satisfies requirement '{}'", wip_version, req_str);
+    // Create temp directory to extract Cargo.toml
+    let temp_dir = match TempDir::new() {
+        Ok(d) => d,
+        Err(e) => {
+            debug!("Failed to create temp dir: {}", e);
+            return None;
+        }
+    };
 
-    let version_req = VersionReq::parse(&req_str)
-        .map_err(|e| Error::SemverError(e))?;
+    let extract_dir = temp_dir.path().join("extracted");
+    if fs::create_dir(&extract_dir).is_err() {
+        return None;
+    }
 
-    Ok(version_req.matches(wip_version))
+    // Extract just the Cargo.toml
+    let mut cmd = Command::new("tar");
+    let cmd = cmd
+        .arg("xzf")
+        .arg(&crate_handle.0)
+        .arg("--strip-components=1")
+        .arg("-C")
+        .arg(&extract_dir)
+        .arg("--wildcards")
+        .arg("*/Cargo.toml");
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            debug!("Failed to run tar command: {}", e);
+            return None;
+        }
+    };
+
+    if !output.status.success() {
+        debug!("tar command failed for {}", rev_dep.name);
+        return None;
+    }
+
+    // Read and parse Cargo.toml
+    let toml_path = extract_dir.join("Cargo.toml");
+    let toml_str = match load_string(&toml_path) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("Failed to read Cargo.toml: {}", e);
+            return None;
+        }
+    };
+
+    let value: toml::Value = match toml::from_str(&toml_str) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("Failed to parse Cargo.toml: {}", e);
+            return None;
+        }
+    };
+
+    // Check [dependencies]
+    if let Some(deps) = value.get("dependencies").and_then(|v| v.as_table()) {
+        if let Some(req) = deps.get(crate_name) {
+            let req_str = extract_requirement_string(req);
+            debug!("Found requirement in [dependencies]: {}", req_str);
+            return Some(req_str);
+        }
+    }
+
+    // Check [dev-dependencies]
+    if let Some(deps) = value.get("dev-dependencies").and_then(|v| v.as_table()) {
+        if let Some(req) = deps.get(crate_name) {
+            let req_str = extract_requirement_string(req);
+            debug!("Found requirement in [dev-dependencies]: {}", req_str);
+            return Some(req_str);
+        }
+    }
+
+    // Check [build-dependencies]
+    if let Some(deps) = value.get("build-dependencies").and_then(|v| v.as_table()) {
+        if let Some(req) = deps.get(crate_name) {
+            let req_str = extract_requirement_string(req);
+            debug!("Found requirement in [build-dependencies]: {}", req_str);
+            return Some(req_str);
+        }
+    }
+
+    debug!("No requirement found for {} in {}'s Cargo.toml", crate_name, rev_dep.name);
+    None
 }
 
 fn resolve_rev_dep_version(name: RevDepName, version: Option<String>) -> Result<RevDep, Error> {
@@ -1282,6 +1485,9 @@ fn compile_with_custom_dep(
     }
 
     let source_dir = &staging_path;
+
+    // Restore Cargo.toml from original backup to prevent contamination
+    restore_cargo_toml(&staging_path)?;
 
     // Clean up any existing .cargo/config from previous runs (old system)
     let cargo_dir = source_dir.join(".cargo");
@@ -1425,6 +1631,8 @@ impl CrateHandle {
             .arg(path.to_str().unwrap().to_owned());
         let r = cmd.output()?;
         if r.status.success() {
+            // Save original Cargo.toml if this is first unpack
+            save_original_cargo_toml(path)?;
             Ok(())
         } else {
             // FIXME: Want to put r in this value but
@@ -1433,6 +1641,31 @@ impl CrateHandle {
             Err(Error::ProcessError(s))
         }
     }
+}
+
+/// Save a backup of Cargo.toml as Cargo.toml.original.txt (only if not already saved)
+fn save_original_cargo_toml(staging_path: &Path) -> Result<(), Error> {
+    let cargo_toml = staging_path.join("Cargo.toml");
+    let original = staging_path.join("Cargo.toml.original.txt");
+
+    // Only save if original doesn't exist yet (first unpack)
+    if !original.exists() && cargo_toml.exists() {
+        fs::copy(&cargo_toml, &original)?;
+        debug!("Saved original Cargo.toml to {:?}", original);
+    }
+    Ok(())
+}
+
+/// Restore Cargo.toml from the original backup before testing
+fn restore_cargo_toml(staging_path: &Path) -> Result<(), Error> {
+    let cargo_toml = staging_path.join("Cargo.toml");
+    let original = staging_path.join("Cargo.toml.original.txt");
+
+    if original.exists() {
+        fs::copy(&original, &cargo_toml)?;
+        debug!("Restored Cargo.toml from original backup in {:?}", staging_path);
+    }
+    Ok(())
 }
 
 
@@ -1503,8 +1736,8 @@ fn report_quick_result(current_num: usize, total: usize, result: &TestResult) {
 fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, config: &Config) {
     match res {
         Ok(results) => {
-            // Print console table
-            report::print_console_table(&results, &config.crate_name, &config.display_version());
+            // Print console table (new five-column format)
+            report::print_console_table_v2(&results, &config.crate_name, &config.display_version());
 
             // Generate markdown analysis report
             let markdown_path = args.output.with_extension("").with_extension("md")
