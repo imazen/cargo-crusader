@@ -14,50 +14,156 @@ Cargo Crusader tests downstream impact of Rust crate changes by building reverse
 cargo build --release
 cargo test
 ./target/release/cargo-crusader --path ~/rust-rgb --top-dependents 1
+./target/release/cargo-crusader --crate rgb --test-versions "0.8.50 0.8.51"
 ```
 
 ## Key Files
 
-- `src/main.rs` - Orchestration, testing flow
-- `src/cli.rs` - Argument parsing (clap)
+- `src/main.rs` - Orchestration, multi-version testing flow
+- `src/cli.rs` - Argument parsing (clap), supports space-delimited values
 - `src/api.rs` - crates.io API (paginated, 100/page)
-- `src/compile.rs` - Compilation logic
-- `src/report.rs` - HTML/markdown generation
+- `src/compile.rs` - Three-step ICT (Install/Check/Test) logic
+- `src/report.rs` - Five-column console table, HTML/markdown generation
+- `src/error_extract.rs` - JSON diagnostic parsing
+
+## Core Data Structures
+
+### OfferedRow (Console Output)
+```rust
+pub struct OfferedRow {
+    /// Baseline test result: None = this IS baseline, Some(bool) = baseline exists and passed/failed
+    pub baseline_passed: Option<bool>,
+
+    /// Primary dependency being tested (depth 0)
+    pub primary: DependencyRef,
+
+    /// Version offered for testing (None for baseline rows)
+    pub offered: Option<OfferedVersion>,
+
+    /// Test execution results for primary dependency
+    pub test: TestExecution,
+
+    /// Transitive dependencies using different versions (depth > 0)
+    pub transitive: Vec<TransitiveTest>,
+}
+
+pub struct DependencyRef {
+    pub dependent_name: String,       // "image"
+    pub dependent_version: String,    // "0.25.8"
+    pub spec: String,                 // "^0.8.52" (what they require)
+    pub resolved_version: String,     // "0.8.91" (what cargo chose)
+    pub resolved_source: VersionSource,  // CratesIo | Local | Git
+    pub used_offered_version: bool,
+}
+
+pub struct OfferedVersion {
+    pub version: String,  // "this(0.8.91)" or "0.8.51"
+    pub forced: bool,     // true shows [≠→!] suffix
+}
+
+pub struct TestExecution {
+    pub commands: Vec<TestCommand>,  // fetch, check, test
+}
+
+pub struct TestCommand {
+    pub command: CommandType,  // Fetch | Check | Test
+    pub features: Vec<String>,
+    pub result: CommandResult,
+}
+
+pub struct CommandResult {
+    pub passed: bool,
+    pub duration: f64,
+    pub failures: Vec<CrateFailure>,  // Which crate(s) failed
+}
+```
 
 ## Architecture
 
-1. Read Cargo.toml → extract crate name/version
-2. Query crates.io for reverse dependencies
-3. ThreadPool tests each dependent in parallel
-4. For each dependent:
+1. **Parse CLI** → Validate args, extract versions (space-delimited supported)
+2. **Read Cargo.toml** → Extract crate name/version, capture git state
+3. **Query crates.io** → Fetch reverse dependencies (paginated)
+4. **ThreadPool testing** → Each dependent tested in parallel
+5. **For each dependent**:
    - Download/cache `.crate` file
-   - Build against published version (baseline)
-   - Build against local WIP version (override)
-   - Compare results
-5. Generate HTML/markdown reports
+   - **Baseline test** (published version)
+   - **Offered version tests** (WIP or specified versions)
+   - **Three-step ICT**: Install (fetch) → Check → Test (early stop on failure)
+   - Extract diagnostics from `--message-format=json`
+6. **Generate reports** → Console (live), HTML, Markdown (AI-optimized)
 
 ## Override Mechanism
 
-**Current**: Creates `.cargo/config` with `paths = ["/path/to/wip"]`
-**Phase 5 Target**: Use `cargo --config 'patch.crates-io.{crate}.path="..."'`
+**Patch mode** (default): `[patch.crates-io]` respects semver
+**Force mode** (`--force-versions`): Direct dependency replacement, bypasses semver
 
-## Test States
+## Test Classification
 
-- **PASSED**: Works with both baseline and override
-- **REGRESSED**: Works with baseline, fails with override
-- **BROKEN**: Fails with baseline (pre-existing issue)
-- **ERROR**: Internal Crusader error
+- **PASSED**: Baseline passed, offered passed → ✓
+- **REGRESSED**: Baseline passed, offered failed → ✗
+- **BROKEN**: Baseline failed → ✗ (both rows fail)
+- **Skipped**: Offered but not tested (resolved elsewhere) → ⊘
+
+## Console Table Format
+
+Five columns: **Offered | Spec | Resolved | Dependent | Result**
+
+**Key behaviors**:
+- Baseline row: `- baseline`
+- Offered row: `{icon} {resolution}{version} [{forced}]`
+- Icons: ✓ (tested pass), ✗ (tested fail), ⊘ (skipped), - (baseline)
+- Resolution: = (exact), ↑ (upgraded), ≠ (mismatch/forced)
+- **Error lines**: Span columns 2-5, borders on 2 & 4 only
+- **Multi-version rows**: Use `├─` prefixes in columns 2-4
+- **Separators**: Full horizontal line between different dependents
+
+See **[CONSOLE-FORMAT.md](CONSOLE-FORMAT.md)** for complete specification with 9 demo scenarios.
 
 ## Caching
 
 - `.crusader/staging/{crate}-{version}/` - Unpacked sources + build artifacts
 - `.crusader/crate-cache/` - Downloaded .crate files
-- Provides 10x speedup on reruns
+- Provides **10x speedup** on reruns
+
+## CLI Flags (Updated)
+
+```bash
+--test-versions <VER>...     # Multiple versions, space-delimited supported
+--force-versions             # Bypass semver requirements
+--features <FEATURES>...     # Passed to cargo fetch/check/test
+-j, --jobs <N>               # Parallel testing
+--crate <NAME>               # Test published crate without local source
+```
+
+**Examples**:
+```bash
+cargo-crusader --test-versions "0.8.0 0.8.48" 0.8.91
+cargo-crusader --crate rgb --test-versions 0.8.50 --force-versions
+cargo-crusader --features "serde unstable" --jobs 4
+```
+
+## Common Workflows
+
+### Test local WIP against top dependents
+```bash
+cd ~/my-crate
+cargo-crusader --top-dependents 10 --jobs 4
+```
+
+### Test multiple versions of published crate
+```bash
+cargo-crusader --crate rgb --test-versions "0.8.48 0.8.50 0.8.51"
+```
+
+### Force test incompatible version
+```bash
+cargo-crusader --test-versions 0.7.0 --force-versions
+```
 
 ## Next Steps
 
-See [PLAN.md](PLAN.md) for Phase 5+ roadmap:
-- Multi-version testing with `--test-versions`
-- 3-step ICT flow (Install/Check/Test)
-- Per-version console table rows
+See [PLAN.md](PLAN.md) for remaining Phase 5+ work:
+- Extract original_requirement from dependent's Cargo.toml
+- Detect multi-version cargo tree scenarios
 - Live crates.io integration tests
+- Real-time console printing per dependent

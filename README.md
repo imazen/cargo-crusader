@@ -26,20 +26,25 @@ cargo-crusader
 
 **Output:**
 ```
-Testing 5 reverse dependencies of rgb
+Testing 2 reverse dependencies of rgb
   this = 0.8.91 4cc3e60* (your work-in-progress version)
 
-┌────────────┬──────────────────────────┬──────────────────┬────────────────┬──────────┐
-│   Status   │        Dependent         │    Depends On    │    Testing     │ Duration │
-├────────────┼──────────────────────────┼──────────────────┼────────────────┼──────────┤
-│  ✓ PASSED  │image 0.25.8              │^0.8.48 ✓✓        │this ✓✓         │     27.0s│
-│  ✓ PASSED  │lodepng 3.10.5            │^0.8.0 ✓✓         │this ✓✓         │     15.3s│
-└────────────┴──────────────────────────┴──────────────────┴────────────────┴──────────┘
+Legend: I=Install (cargo fetch), C=Check (cargo check), T=Test (cargo test)
+
+┌────────────────────┬──────────┬─────────────────┬─────────────────────┬─────────────────────┐
+│ Offered            │ Spec     │ Resolved        │ Dependent           │ Result         Time │
+├────────────────────┼──────────┼─────────────────┼─────────────────────┼─────────────────────┤
+│ - baseline         │ ^0.8.48  │ 0.8.51 📦       │ image 0.25.8        │ PASSED ✓✓✓     2.1s │
+│ ✓ =this(0.8.91)    │ ^0.8.48  │ 0.8.91 📁       │ image 0.25.8        │ PASSED ✓✓✓     1.9s │
+├────────────────────┼──────────┼─────────────────┼─────────────────────┼─────────────────────┤
+│ - baseline         │ ^0.8.0   │ 0.8.51 📦       │ lodepng 3.10.5      │ PASSED ✓✓✓     1.7s │
+│ ✓ =this(0.8.91)    │ ^0.8.0   │ 0.8.91 📁       │ lodepng 3.10.5      │ PASSED ✓✓✓     1.5s │
+└────────────────────┴──────────┴─────────────────┴─────────────────────┴─────────────────────┘
 
 Summary:
-  ✓ Passed:    5
+  ✓ Passed:    2
   ✗ Regressed: 0
-  ⚠ Broken:    0
+  ⊘ Skipped:   0
 
 HTML report: crusader-report.html
 Markdown report: crusader-report.md
@@ -56,17 +61,26 @@ cargo-crusader --top-dependents 10
 # Test specific crates (supports version pinning)
 cargo-crusader --dependents image:0.25.8 serde tokio
 
-# Parallel testing with caching (10x faster)
+# Parallel testing with a custom caching dir (10x faster)
 cargo-crusader --jobs 4 --staging-dir .crusader/staging
 
 # Fast check-only (skip tests)
 cargo-crusader --no-test --jobs 8
 
-# Test against specific crate versions (Phase 5, in progress)
-cargo-crusader --test-versions 0.8.0 0.8.48
+# Test against multiple crate versions
+cargo-crusader --test-versions "0.8.0 0.8.48" 0.8.91
+
+# Force version testing (bypass semver)
+cargo-crusader --test-versions 0.9.0--force-versions 0.7.1
+
+# Test with specific features enabled
+cargo-crusader --features "serde unstable"
 
 # Test different crate path
 cargo-crusader --path ~/my-crate
+
+# Test published crate without local source
+cargo-crusader --crate rgb --test-versions 0.8.50 0.8.51
 ```
 
 ---
@@ -76,6 +90,7 @@ cargo-crusader --path ~/my-crate
 ### Primary Options
 ```
 -p, --path <PATH>               Path to crate (directory or Cargo.toml)
+-c, --crate <NAME>              Crate name (for testing published crates)
 --top-dependents <N>            Test top N by downloads [default: 5]
 --dependents <CRATE[:VER]>...   Test specific crates (supports version pins)
 --dependent-paths <PATH>...     Test local crates
@@ -84,7 +99,14 @@ cargo-crusader --path ~/my-crate
 --output <PATH>                 HTML output [default: crusader-report.html]
 --no-check                      Skip cargo check
 --no-test                       Skip cargo test
---json                          JSON output (planned)
+--json                          JSON output
+```
+
+### Multi-Version Testing
+```
+--test-versions <VER>...        Test specific versions (space-delimited supported)
+--force-versions <VER>...       Force testing specific versions (bypass semver requirements)
+--features <FEATURES>...        Feature flags passed to cargo commands
 ```
 
 ### Version Syntax
@@ -92,39 +114,73 @@ cargo-crusader --path ~/my-crate
 # Pin specific versions
 cargo-crusader --dependents image:0.25.8 serde:1.0.0
 
-# Mix pinned and latest
-cargo-crusader --dependents image:0.25.8 serde tokio
+# Test multiple versions (space-delimited within args or across args)
+cargo-crusader --test-versions "0.8.0 0.8.48" 0.8.91
+
+
+# Pass feature flags to cargo
+cargo-crusader --features "default serde" --features rgb/unstable
 ```
 
 ---
 
 ## Result States
 
-| Status | Description |
-|--------|-------------|
-| **✓ PASSED** | Compiled and tested successfully with both baseline and override |
-| **✗ REGRESSED** | Worked with published version, fails with WIP changes |
-| **⚠ BROKEN** | Already fails with published version (pre-existing issue) |
-| **⚡ ERROR** | Internal Crusader error during testing |
+| Status | Icon | Description |
+|--------|------|-------------|
+| **PASSED** | ✓ | Compiled and tested successfully with offered version |
+| **REGRESSED** | ✗ | Baseline passed but offered version failed |
+| **BROKEN** | ✗ | Both baseline and offered version failed |
+| **Skipped** | ⊘ | Version offered but not tested (resolved elsewhere) |
+
+**Icon meanings in Offered column:**
+- `✓` = Test ran with this version and passed
+- `✗` = Test ran with this version and failed
+- `⊘` = Version was offered but skipped (not used by cargo)
+- `-` = Baseline test row
+- `=` = Cargo resolved to exact offered version
+- `↑` = Cargo upgraded to newer compatible version
+- `≠` = Version mismatch or forced
 
 ---
 
 ## Output Formats
 
-### Phase 5 Target: ICT Console Table
+### Five-Column Console Table
 ```
+Testing 2 reverse dependencies of rgb
+  this = 0.8.91 a138e69* (your work-in-progress version)
+  features: default
+
 Legend: I=Install (cargo fetch), C=Check (cargo check), T=Test (cargo test)
 
-┌────────────┬──────────────────────────┬──────────────┬─────┬──────────┐
-│   Status   │        Dependent         │  Version     │ ICT │ Duration │
-├────────────┼──────────────────────────┼──────────────┼─────┼──────────┤
-│  ✗ REGRESS │image 0.25.8              │0.8.0         │✓✗✓  │     18.2s│
-│  ✓ PASSED  │image 0.25.8              │0.8.48        │✓✓✓  │     27.0s│
-│  ✓ PASSED  │image 0.25.8              │this          │✓✓✓  │     27.0s│
-└────────────┴──────────────────────────┴──────────────┴─────┴──────────┘
+┌────────────────────┬──────────┬─────────────────┬─────────────────────┬─────────────────────┐
+│ Offered            │ Spec     │ Resolved        │ Dependent           │ Result         Time │
+├────────────────────┼──────────┼─────────────────┼─────────────────────┼─────────────────────┤
+│ - baseline         │ ^0.8.52  │ 0.8.51 📦       │ image 0.25.8        │ PASSED ✓✓✓     2.1s │
+│ ✓ =this(0.8.91)    │ ^0.8.52  │ 0.8.91 📁       │ image 0.25.8        │ PASSED ✓✓✓     1.9s │
+├────────────────────┼──────────┼─────────────────┼─────────────────────┼─────────────────────┤
+│ - baseline         │ ^0.8     │ 0.8.51 📦       │ pixels 0.14         │ PASSED ✓✓✓     1.5s │
+│ ✗ =this(0.8.91)    │ ^0.8     │ 0.8.91 📁       │ pixels 0.14         │ REGRESSED ✓✗-  1.4s │
+│                    ├──────────┴─────────────────┴─────────────────────┼─────────────────────┤
+│                    │ cargo check failed on pixels:0.14                │                     │
+│                    │   • error[E0061]: function takes 2 arguments     │                     │
+└────────────────────┴───────────────────────────────────────────────────┴─────────────────────┘
+
+Summary:
+  ✓ Passed:    1
+  ✗ Regressed: 1
+  ⊘ Skipped:   0
 ```
 
-**Sorting**: Worst status first (REGRESSED > BROKEN > ERROR > PASSED)
+**Features:**
+- Baseline + offered versions for each dependent
+- Separator lines between different dependents
+- Error details expand with L-shaped borders (columns 2-5)
+- Multi-version tree display with `├─` prefixes
+- Forced versions show `[≠→!]` suffix
+
+See [CONSOLE-FORMAT.md](CONSOLE-FORMAT.md) for complete format specification and all demo scenarios.
 
 ### HTML Report
 - Visual summary cards with statistics
