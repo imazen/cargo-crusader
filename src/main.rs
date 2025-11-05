@@ -211,6 +211,7 @@ struct Config {
     base_override: CrateOverride,
     next_override: CrateOverride,
     limit: Option<usize>,
+    force_versions: Vec<String>,  // List of versions to force (bypass semver)
 }
 
 impl Config {
@@ -337,6 +338,7 @@ fn get_config(args: &cli::CliArgs) -> Result<Config, Error> {
         base_override: CrateOverride::Default,
         next_override,
         limit,
+        force_versions: args.force_versions.clone(),
     })
 }
 
@@ -486,6 +488,99 @@ pub enum VersionStatus {
     Passed,
     Broken,
     Regressed,
+}
+
+// ============================================================================
+// Five-Column Console Table Data Structures (Phase 5+)
+// ============================================================================
+
+/// A single row in the five-column console table output
+#[derive(Debug, Clone)]
+pub struct OfferedRow {
+    /// Baseline test result: None = this IS baseline, Some(bool) = baseline exists and passed/failed
+    pub baseline_passed: Option<bool>,
+
+    /// Primary dependency being tested (depth 0)
+    pub primary: DependencyRef,
+
+    /// Version offered for testing (None for baseline rows)
+    pub offered: Option<OfferedVersion>,
+
+    /// Test execution results for primary dependency
+    pub test: TestExecution,
+
+    /// Transitive dependencies using different versions (depth > 0)
+    pub transitive: Vec<TransitiveTest>,
+}
+
+/// Reference to a dependency (primary or transitive)
+#[derive(Debug, Clone)]
+pub struct DependencyRef {
+    pub dependent_name: String,       // "image"
+    pub dependent_version: String,    // "0.25.8"
+    pub spec: String,                 // "^0.8.52" (what they require)
+    pub resolved_version: String,     // "0.8.91" (what cargo chose)
+    pub resolved_source: VersionSource,  // CratesIo | Local | Git
+    pub used_offered_version: bool,   // true if resolved == offered
+}
+
+/// Version offered for testing
+#[derive(Debug, Clone)]
+pub struct OfferedVersion {
+    pub version: String,  // "this(0.8.91)" or "0.8.51"
+    pub forced: bool,     // true shows [≠→!] suffix
+}
+
+/// Test execution (Install/Check/Test)
+#[derive(Debug, Clone)]
+pub struct TestExecution {
+    pub commands: Vec<TestCommand>,  // fetch, check, test
+}
+
+/// A single test command (fetch, check, or test)
+#[derive(Debug, Clone)]
+pub struct TestCommand {
+    pub command: CommandType,
+    pub features: Vec<String>,
+    pub result: CommandResult,
+}
+
+/// Type of command executed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandType {
+    Fetch,
+    Check,
+    Test,
+}
+
+/// Result of executing a command
+#[derive(Debug, Clone)]
+pub struct CommandResult {
+    pub passed: bool,
+    pub duration: f64,
+    pub failures: Vec<CrateFailure>,  // Which crate(s) failed
+}
+
+/// A crate that failed during testing
+#[derive(Debug, Clone)]
+pub struct CrateFailure {
+    pub crate_name: String,
+    pub error_message: String,
+}
+
+/// Transitive dependency test (depth > 0)
+#[derive(Debug, Clone)]
+pub struct TransitiveTest {
+    pub dependency: DependencyRef,
+    pub depth: usize,
+}
+
+/// Source of a version (crates.io, local, or git)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionSource {
+    CratesIo,
+    Local,
+    Git,
 }
 
 impl TestResult {

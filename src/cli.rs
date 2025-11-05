@@ -1,4 +1,4 @@
-use clap::{ArgAction, Parser};
+use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
@@ -56,6 +56,12 @@ pub struct CliArgs {
     /// Output results as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Force testing specific versions, bypassing semver requirements
+    /// Accepts multiple versions like --test-versions (e.g., "0.7.0 1.0.0-rc.1")
+    /// These versions are tested even if they don't satisfy dependent's requirements
+    #[arg(long, value_name = "VERSION", num_args = 0..)]
+    pub force_versions: Vec<String>,
 }
 
 impl CliArgs {
@@ -65,6 +71,12 @@ impl CliArgs {
 
         // Split test_versions on whitespace to support quoted lists like '0.8.51 0.8.91-alpha.3'
         args.test_versions = args.test_versions
+            .iter()
+            .flat_map(|s| s.split_whitespace().map(|v| v.to_string()))
+            .collect();
+
+        // Split force_versions on whitespace as well
+        args.force_versions = args.force_versions
             .iter()
             .flat_map(|s| s.split_whitespace().map(|v| v.to_string()))
             .collect();
@@ -128,6 +140,7 @@ mod tests {
             dependents: vec![],
             dependent_paths: vec![],
             test_versions: vec![],
+            force_versions: vec![],
             jobs: 1,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
@@ -147,6 +160,7 @@ mod tests {
             dependents: vec![],
             dependent_paths: vec![],
             test_versions: vec![],
+            force_versions: vec![],
             jobs: 0,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
@@ -169,6 +183,7 @@ mod tests {
             dependents: vec![],
             dependent_paths: vec![],
             test_versions: vec![],
+            force_versions: vec![],
             jobs: 1,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
@@ -190,6 +205,7 @@ mod tests {
             dependents: vec![],
             dependent_paths: vec![PathBuf::from("/tmp/crate")],
             test_versions: vec![],
+            force_versions: vec![],
             jobs: 1,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),
@@ -209,6 +225,7 @@ mod tests {
             dependents: vec!["serde".to_string()],
             dependent_paths: vec![],
             test_versions: vec![],
+            force_versions: vec![],
             jobs: 1,
             output: PathBuf::from("report.html"),
             staging_dir: PathBuf::from(".crusader/staging"),

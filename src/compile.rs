@@ -8,6 +8,20 @@ use tempfile::TempDir;
 use log::debug;
 use crate::error_extract::{Diagnostic, parse_cargo_json};
 
+/// Restore Cargo.toml from the original backup before testing
+/// This prevents contamination between test runs in the cached staging directory
+fn restore_cargo_toml(staging_path: &Path) -> Result<(), String> {
+    let cargo_toml = staging_path.join("Cargo.toml");
+    let original = staging_path.join("Cargo.toml.original.txt");
+
+    if original.exists() {
+        fs::copy(&original, &cargo_toml)
+            .map_err(|e| format!("Failed to restore Cargo.toml from original: {}", e))?;
+        debug!("Restored Cargo.toml from original backup in {:?}", staging_path);
+    }
+    Ok(())
+}
+
 /// The type of compilation step being performed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompileStep {

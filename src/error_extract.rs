@@ -4,7 +4,7 @@
 /// structured error information for better reporting.
 
 use serde::{Deserialize, Serialize};
-use std::io::BufRead;
+// BufRead not needed for current implementation
 
 /// A diagnostic message from the compiler
 #[derive(Debug, Clone, Serialize, Deserialize)]
