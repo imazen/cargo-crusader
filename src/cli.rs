@@ -61,7 +61,15 @@ pub struct CliArgs {
 impl CliArgs {
     /// Parse command-line arguments
     pub fn parse_args() -> Self {
-        CliArgs::parse()
+        let mut args = CliArgs::parse();
+
+        // Split test_versions on whitespace to support quoted lists like '0.8.51 0.8.91-alpha.3'
+        args.test_versions = args.test_versions
+            .iter()
+            .flat_map(|s| s.split_whitespace().map(|v| v.to_string()))
+            .collect();
+
+        args
     }
 
     /// Validate argument combinations

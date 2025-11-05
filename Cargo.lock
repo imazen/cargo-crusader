@@ -120,6 +120,7 @@ dependencies = [
  "term",
  "threadpool",
  "toml",
+ "toml_edit",
  "ureq",
 ]
 

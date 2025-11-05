@@ -870,17 +870,20 @@ fn run_multi_version_test(
 
     // Reorder versions: baseline first, then --test-versions, then this/latest
     if let Some(ref baseline) = baseline_version {
-        // Remove baseline from test_versions if it's already there
-        test_versions.retain(|v| {
-            if let compile::VersionSource::Published(ref ver) = v {
-                ver != baseline && !baseline.starts_with(&format!("^{}", ver)) && !baseline.starts_with(&format!("~{}", ver))
-            } else {
-                true
-            }
-        });
+        // Skip wildcard or star baselines
+        if baseline != "*" && !baseline.is_empty() {
+            // Remove baseline from test_versions if it's already there
+            test_versions.retain(|v| {
+                if let compile::VersionSource::Published(ref ver) = v {
+                    ver != baseline && !baseline.starts_with(&format!("^{}", ver)) && !baseline.starts_with(&format!("~{}", ver))
+                } else {
+                    true
+                }
+            });
 
-        // Add baseline at the front
-        test_versions.insert(0, compile::VersionSource::Published(baseline.clone()));
+            // Add baseline at the front
+            test_versions.insert(0, compile::VersionSource::Published(baseline.clone()));
+        }
     }
 
     // Check version compatibility
@@ -952,6 +955,8 @@ fn run_multi_version_test(
                             },
                             check: None,
                             test: None,
+                            actual_version: None,
+                            expected_version: Some(parse_version_from_requirement(version)),
                         };
                         outcomes.push(VersionTestOutcome {
                             version_source: version_source.clone(),
@@ -966,14 +971,40 @@ fn run_multi_version_test(
         let skip_check = false; // TODO: Get from args
         let skip_test = false;  // TODO: Get from args
 
+        // Determine expected version for verification
+        let expected_version = match &version_source {
+            compile::VersionSource::Published(v) => {
+                Some(parse_version_from_requirement(v))
+            }
+            compile::VersionSource::Local(_) => None, // Can't verify local versions
+        };
+
         match compile::run_three_step_ict(
             &staging_path,
             &config.crate_name,
             override_path.as_deref(),
             skip_check,
             skip_test,
+            expected_version,
         ) {
             Ok(result) => {
+                // Check for version mismatch
+                if let (Some(ref expected), Some(ref actual)) = (&result.expected_version, &result.actual_version) {
+                    if actual != expected {
+                        status(&format!(
+                            "⚠️  VERSION MISMATCH: Expected {} but cargo resolved to {}!",
+                            expected, actual
+                        ));
+                    } else {
+                        debug!("✓ Version verified: {} = {}", expected, actual);
+                    }
+                } else if result.expected_version.is_some() && result.actual_version.is_none() {
+                    status(&format!(
+                        "⚠️  Could not verify version for {} (cargo tree failed)",
+                        config.crate_name
+                    ));
+                }
+
                 outcomes.push(VersionTestOutcome {
                     version_source: version_source.clone(),
                     result,

@@ -370,6 +370,20 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, display_ver
                     };
 
                     print_colored_row_ict(status_label, &name, &version_label, &ict_marks, &duration, color);
+
+                    // Show version verification and diagnostics for failures
+                    if !outcome.result.is_success() {
+                        // Version mismatch warning
+                        if let (Some(ref expected), Some(ref actual)) = (&outcome.result.expected_version, &outcome.result.actual_version) {
+                            if expected != actual {
+                                println!("│            │  ⚠️ VERSION MISMATCH: Expected {} but got {}",
+                                    expected, actual);
+                            }
+                        }
+
+                        // Print diagnostics
+                        print_outcome_diagnostics(outcome);
+                    }
                 }
             }
         }
@@ -435,6 +449,69 @@ fn format_step(result: &CompileResult) -> String {
     let marker = if result.success { "✓" } else { "✗" };
     let duration = format!("{:.1}s", result.duration.as_secs_f64());
     format!("{} {}", marker, duration)
+}
+
+/// Print diagnostics for a failed version test outcome
+fn print_outcome_diagnostics(outcome: &VersionTestOutcome) {
+    use crate::error_extract::DiagnosticLevel;
+
+    // Find the first failed step
+    let failed_step = outcome.result.first_failure();
+
+    if let Some(failed) = failed_step {
+        // Only show diagnostics if we have them
+        if !failed.diagnostics.is_empty() {
+            let error_count = failed.diagnostics.iter()
+                .filter(|d| matches!(d.level, DiagnosticLevel::Error))
+                .count();
+
+            if error_count > 0 {
+                println!("│            │  └─ {} error(s):", error_count);
+
+                // Show first 2 errors with their rendered output
+                for diag in failed.diagnostics.iter()
+                    .filter(|d| matches!(d.level, DiagnosticLevel::Error))
+                    .take(2) {
+
+                    // Truncate message if too long
+                    let msg = if diag.message.len() > 80 {
+                        format!("{}...", &diag.message[..77])
+                    } else {
+                        diag.message.clone()
+                    };
+
+                    println!("│            │     • {}", msg);
+                }
+
+                if error_count > 2 {
+                    println!("│            │     ... and {} more error(s)", error_count - 2);
+                }
+            }
+        } else {
+            // No diagnostics, show stderr excerpt
+            let stderr = &failed.stderr;
+            if !stderr.is_empty() {
+                let lines: Vec<&str> = stderr.lines().collect();
+                let relevant_lines: Vec<&str> = lines.iter()
+                    .filter(|l| l.contains("error") || l.contains("Error") || l.contains("failed"))
+                    .take(3)
+                    .copied()
+                    .collect();
+
+                if !relevant_lines.is_empty() {
+                    println!("│            │  └─ Error output:");
+                    for line in relevant_lines {
+                        let truncated = if line.len() > 80 {
+                            format!("{}...", &line[..77])
+                        } else {
+                            line.to_string()
+                        };
+                        println!("│            │     {}", truncated);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Export markdown analysis report for AI/LLM analysis
