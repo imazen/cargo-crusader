@@ -271,13 +271,6 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
         api_deps.into_iter().map(|d| (d.name, None)).collect()
     };
 
-    status(&format!(
-        "testing {} reverse dependencies of {} v{}",
-        rev_deps.len(),
-        config.crate_name,
-        config.version
-    ));
-
     // Run all the tests in a thread pool and create a list of result
     // receivers.
     let mut result_rxs = Vec::new();
