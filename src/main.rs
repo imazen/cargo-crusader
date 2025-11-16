@@ -1187,6 +1187,8 @@ fn run_multi_version_test(
                 false
             }
         };
+        debug!("Version {}: idx={}, baseline_version={:?}, version_source={}, is_baseline={}",
+               idx, idx, baseline_version, version_source.label(), is_baseline);
 
         // For baseline: no download, no patch - test as-is
         // For offered versions: download and patch
@@ -1249,13 +1251,21 @@ fn run_multi_version_test(
         let skip_test = false;  // TODO: Get from args
 
         // Determine expected version for verification and if it's forced
-        let (expected_version, is_forced) = match &version_source {
-            compile::VersionSource::Published(v) => {
-                // v is already validated as concrete semver at input time
-                let forced = config.force_versions.contains(v);
-                (Some(v.clone()), forced)
+        // IMPORTANT: Baseline is NEVER forced, even if it's in --force-versions list
+        let (expected_version, is_forced) = if is_baseline {
+            match &version_source {
+                compile::VersionSource::Published(v) => (Some(v.clone()), false),
+                compile::VersionSource::Local(_) => (None, false),
             }
-            compile::VersionSource::Local(_) => (None, true), // Always force local versions (WIP, likely breaks semver)
+        } else {
+            match &version_source {
+                compile::VersionSource::Published(v) => {
+                    // v is already validated as concrete semver at input time
+                    let forced = config.force_versions.contains(v);
+                    (Some(v.clone()), forced)
+                }
+                compile::VersionSource::Local(_) => (None, true), // Always force local versions (WIP, likely breaks semver)
+            }
         };
 
         // Create label for failure logging

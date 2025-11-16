@@ -347,9 +347,31 @@ fn force_dependency_spec(
             if let Some(dep) = deps.get_mut(dep_name) {
                 debug!("Force-replacing {} in [{}] with path {:?}", dep_name, section, override_path);
 
-                // Replace with path override (no version constraint)
+                // Preserve existing fields (optional, default-features, features, etc.)
                 let mut new_dep = toml_edit::InlineTable::new();
                 new_dep.insert("path", override_path.display().to_string().into());
+
+                // Copy fields from original dependency if it's a table
+                if let Some(old_table) = dep.as_inline_table() {
+                    // Preserve important fields
+                    for key in ["optional", "default-features", "features", "package"] {
+                        if let Some(value) = old_table.get(key) {
+                            new_dep.insert(key, value.clone());
+                            debug!("Preserving field '{}' = {:?}", key, value);
+                        }
+                    }
+                } else if let Some(old_table) = dep.as_table_like() {
+                    // Handle table-like dependencies
+                    for key in ["optional", "default-features", "features", "package"] {
+                        if let Some(value) = old_table.get(key) {
+                            if let Some(v) = value.as_value() {
+                                new_dep.insert(key, v.clone());
+                                debug!("Preserving field '{}' = {:?}", key, v);
+                            }
+                        }
+                    }
+                }
+
                 *dep = toml_edit::Item::Value(toml_edit::Value::InlineTable(new_dep));
             }
         }

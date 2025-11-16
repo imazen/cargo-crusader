@@ -178,28 +178,36 @@ lazy_static! {
 }
 
 /// Print table header
-pub fn print_table_header(crate_name: &str, display_version: &str, total_deps: usize) {
+/// Format table header as a string
+pub fn format_table_header(crate_name: &str, display_version: &str, total_deps: usize) -> String {
     let term_width = get_terminal_width();
-    println!("\n{}", "=".repeat(term_width));
-    println!("Testing {} reverse dependencies of {}", total_deps, crate_name);
-    println!("  this = {} (your work-in-progress version)", display_version);
-    println!("{}", "=".repeat(term_width));
-    println!();
-
-    // Print table header
     let w = &*WIDTHS;
-    println!("┌{:─<width1$}┬{:─<width2$}┬{:─<width3$}┬{:─<width4$}┬{:─<width5$}┐",
+
+    let mut output = String::new();
+    output.push_str(&format!("\n{}\n", "=".repeat(term_width)));
+    output.push_str(&format!("Testing {} reverse dependencies of {}\n", total_deps, crate_name));
+    output.push_str(&format!("  this = {} (your work-in-progress version)\n", display_version));
+    output.push_str(&format!("{}\n", "=".repeat(term_width)));
+    output.push('\n');
+
+    output.push_str(&format!("┌{:─<width1$}┬{:─<width2$}┬{:─<width3$}┬{:─<width4$}┬{:─<width5$}┐\n",
              "", "", "", "", "",
              width1 = w.offered, width2 = w.spec, width3 = w.resolved,
-             width4 = w.dependent, width5 = w.result);
-    println!("│{:^width1$}│{:^width2$}│{:^width3$}│{:^width4$}│{:^width5$}│",
+             width4 = w.dependent, width5 = w.result));
+    output.push_str(&format!("│{:^width1$}│{:^width2$}│{:^width3$}│{:^width4$}│{:^width5$}│\n",
              "Offered", "Spec", "Resolved", "Dependent", "Result         Time",
              width1 = w.offered, width2 = w.spec, width3 = w.resolved,
-             width4 = w.dependent, width5 = w.result);
-    println!("├{:─<width1$}┼{:─<width2$}┼{:─<width3$}┼{:─<width4$}┼{:─<width5$}┤",
+             width4 = w.dependent, width5 = w.result));
+    output.push_str(&format!("├{:─<width1$}┼{:─<width2$}┼{:─<width3$}┼{:─<width4$}┼{:─<width5$}┤\n",
              "", "", "", "", "",
              width1 = w.offered, width2 = w.spec, width3 = w.resolved,
-             width4 = w.dependent, width5 = w.result);
+             width4 = w.dependent, width5 = w.result));
+
+    output
+}
+
+pub fn print_table_header(crate_name: &str, display_version: &str, total_deps: usize) {
+    print!("{}", format_table_header(crate_name, display_version, total_deps));
 }
 
 /// Print separator line between dependents
@@ -211,13 +219,18 @@ pub fn print_separator_line() {
              width4 = w.dependent, width5 = w.result);
 }
 
-/// Print table footer
-pub fn print_table_footer() {
+/// Format table footer as a string
+pub fn format_table_footer() -> String {
     let w = &*WIDTHS;
-    println!("└{:─<width1$}┴{:─<width2$}┴{:─<width3$}┴{:─<width4$}┴{:─<width5$}┘",
+    format!("└{:─<width1$}┴{:─<width2$}┴{:─<width3$}┴{:─<width4$}┴{:─<width5$}┘\n",
              "", "", "", "", "",
              width1 = w.offered, width2 = w.spec, width3 = w.resolved,
-             width4 = w.dependent, width5 = w.result);
+             width4 = w.dependent, width5 = w.result)
+}
+
+/// Print table footer
+pub fn print_table_footer() {
+    print!("{}", format_table_footer());
 }
 
 /// Print an OfferedRow using the standard table format
@@ -587,15 +600,22 @@ pub fn summarize_results(results: &[crate::TestResult]) -> TestSummary {
     }
 }
 
+/// Format summary statistics as a string
+pub fn format_summary(summary: &TestSummary) -> String {
+    let mut output = String::new();
+    output.push_str("\nSummary:\n");
+    output.push_str(&format!("  ✓ Passed:    {}\n", summary.passed));
+    output.push_str(&format!("  ✗ Regressed: {}\n", summary.regressed));
+    output.push_str(&format!("  ⚠ Broken:    {}\n", summary.broken));
+    output.push_str("  ━━━━━━━━━━━━━\n");
+    output.push_str(&format!("  Total:       {}\n", summary.total));
+    output.push('\n');
+    output
+}
+
 /// Print summary statistics
 pub fn print_summary(summary: &TestSummary) {
-    println!("\nSummary:");
-    println!("  ✓ Passed:    {}", summary.passed);
-    println!("  ✗ Regressed: {}", summary.regressed);
-    println!("  ⚠ Broken:    {}", summary.broken);
-    println!("  ━━━━━━━━━━━━━");
-    println!("  Total:       {}", summary.total);
-    println!();
+    print!("{}", format_summary(summary));
 }
 
 //
