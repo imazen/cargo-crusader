@@ -76,6 +76,90 @@ fn parse_dependent_spec(spec: &str) -> (String, Option<String>) {
     }
 }
 
+/// Print a compact test plan showing what will be tested
+fn print_test_plan(
+    rev_deps: &[(String, Option<String>)],
+    versions: &[compile::VersionSource],
+    force_versions: &[String],
+    force_local: bool,
+    config: &Config,
+) {
+    // Format dependents list
+    let deps_display: Vec<String> = rev_deps.iter()
+        .map(|(name, ver)| {
+            if let Some(v) = ver {
+                format!("{}:{}", name, v)
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+
+    // Format versions list with force indicators (deduplicate versions)
+    let mut versions_display = Vec::new();
+    let mut seen_versions = std::collections::HashSet::new();
+    versions_display.push("baseline".to_string()); // baseline is always tested first
+
+    for version in versions {
+        let (version_str, is_forced) = match version {
+            compile::VersionSource::Published(v) => {
+                (v.clone(), force_versions.contains(v))
+            }
+            compile::VersionSource::Local(_) => {
+                ("this".to_string(), force_local)
+            }
+        };
+
+        // Skip if we've already seen this version (dedup)
+        if seen_versions.contains(&version_str) {
+            continue;
+        }
+        seen_versions.insert(version_str.clone());
+
+        if is_forced {
+            versions_display.push(format!("{} [!]", version_str));
+        } else {
+            versions_display.push(version_str);
+        }
+    }
+
+    // Print compact plan
+    println!("\nTest Plan:");
+    println!("  {} × {} = {} tests",
+        rev_deps.len(),
+        versions_display.len(),
+        rev_deps.len() * versions_display.len()
+    );
+
+    // Show dependents (compact, comma-separated, max 80 chars per line)
+    print!("  Dependents: ");
+    let deps_str = deps_display.join(", ");
+    if deps_str.len() <= 70 {
+        println!("{}", deps_str);
+    } else {
+        // Wrap at reasonable points
+        let mut line = String::new();
+        for (i, dep) in deps_display.iter().enumerate() {
+            if i > 0 {
+                line.push_str(", ");
+            }
+            if line.len() + dep.len() > 70 && !line.is_empty() {
+                println!("{}", line);
+                print!("              ");
+                line.clear();
+            }
+            line.push_str(dep);
+        }
+        if !line.is_empty() {
+            println!("{}", line);
+        }
+    }
+
+    // Show versions (compact, comma-separated)
+    println!("  Versions: {}", versions_display.join(", "));
+    println!();
+}
+
 fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     // Initialize failure log
     let log_path = std::env::current_dir()
@@ -275,6 +359,23 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     // receivers.
     let mut result_rxs = Vec::new();
     let ref mut pool = ThreadPool::new(args.jobs);
+
+    // Build version list for display (same logic as per-dependent)
+    let versions_to_test = test_versions.clone().unwrap_or_else(|| {
+        let mut versions = Vec::new();
+        if let CrateOverride::Source(ref manifest_path) = config.next_override {
+            versions.push(compile::VersionSource::Local(manifest_path.clone()));
+        } else {
+            if let Ok(ver) = resolve_latest_version(&config.crate_name, false) {
+                versions.push(compile::VersionSource::Published(ver));
+            }
+        }
+        versions
+    });
+
+    // Print test plan
+    print_test_plan(&rev_deps, &versions_to_test, &config.force_versions, force_local, &config);
+
     for (rev_dep, version) in rev_deps {
         // Always use multi-version testing (legacy path removed)
         // If --test-versions not specified, build vec with just "this" - baseline will be auto-inferred
