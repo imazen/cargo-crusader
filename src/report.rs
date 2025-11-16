@@ -138,9 +138,6 @@ pub fn summarize_results(results: &[TestResult]) -> Summary {
 
     for result in results {
         match &result.data {
-            TestResultData::Broken(..) => sum.broken += 1,
-            TestResultData::Regressed(..) => sum.regressed += 1,
-            TestResultData::Passed(..) => sum.passed += 1,
             TestResultData::Skipped(_) => sum.skipped += 1,
             TestResultData::Error(..) => sum.error += 1,
             TestResultData::MultiVersion(ref outcomes) => {
@@ -212,7 +209,24 @@ pub fn print_immediate_failure(result: &TestResult) {
 
     match &result.data {
         TestResultData::Regressed(four_step) => {
-            println!("\nStatus: REGRESSED (compiled with baseline, failed with WIP version)\n");
+            // Determine which step failed
+            let failure_desc = if let Some(ref check) = four_step.override_check {
+                if check.failed() {
+                    "FAILED CHECK (compiled with baseline, failed check with WIP version)"
+                } else if let Some(ref test) = four_step.override_test {
+                    if test.failed() {
+                        "FAILED TEST (compiled with baseline, failed test with WIP version)"
+                    } else {
+                        "FAILED (compiled with baseline, failed with WIP version)"
+                    }
+                } else {
+                    "FAILED (compiled with baseline, failed with WIP version)"
+                }
+            } else {
+                "FAILED FETCH (failed to fetch with WIP version)"
+            };
+
+            println!("\nStatus: {}\n", failure_desc);
 
             // Show which step failed
             if let Some(ref check) = four_step.override_check {
@@ -305,11 +319,43 @@ fn print_step_failure(step_name: &str, result: &CompileResult) {
     }
 }
 
+/// Determine specific failure type from ThreeStepResult
+fn get_failure_type(result: &ThreeStepResult) -> &'static str {
+    if !result.fetch.success {
+        "FAILED FETCH"
+    } else if result.check.as_ref().map_or(false, |c| !c.success) {
+        "FAILED CHECK"
+    } else if result.test.as_ref().map_or(false, |t| !t.success) {
+        "FAILED TEST"
+    } else {
+        "FAILED"  // fallback
+    }
+}
+
 /// Get status label and color for a test result
 fn get_status_info(data: &TestResultData) -> (&'static str, Color) {
     match data {
         TestResultData::Passed(..) => ("✓ PASSED", term::color::BRIGHT_GREEN),
-        TestResultData::Regressed(..) => ("✗ REGRESSED", term::color::BRIGHT_RED),
+        TestResultData::Regressed(four_step) => {
+            // Determine which step failed in the override
+            let failure_type = if let Some(ref check) = four_step.override_check {
+                if check.failed() {
+                    "✗ FAILED CHECK"
+                } else if let Some(ref test) = four_step.override_test {
+                    if test.failed() {
+                        "✗ FAILED TEST"
+                    } else {
+                        "✗ FAILED"
+                    }
+                } else {
+                    "✗ FAILED"
+                }
+            } else {
+                "✗ FAILED FETCH"
+            };
+            // Leak the string to get a 'static lifetime (this is called rarely so acceptable)
+            (Box::leak(failure_type.to_string().into_boxed_str()), term::color::BRIGHT_RED)
+        },
         TestResultData::Broken(..) => ("⚠ BROKEN", term::color::BRIGHT_YELLOW),
         TestResultData::Skipped(..) => ("⊘ SKIPPED", term::color::BRIGHT_CYAN),
         TestResultData::Error(..) => ("⚡ ERROR", term::color::BRIGHT_MAGENTA),
@@ -467,7 +513,7 @@ fn build_table_rows(result: &TestResult, this_version: &str) -> Vec<TableRow> {
                 // Result summary (status + ICT marks)
                 let result_status = match status {
                     VersionStatus::Passed => "PASSED",
-                    VersionStatus::Regressed => "REGRESSED",
+                    VersionStatus::Regressed => get_failure_type(&outcome.result),
                     VersionStatus::Broken => "BROKEN",
                 };
                 let ict_marks = outcome.result.format_ict_marks();
@@ -721,7 +767,7 @@ pub fn print_console_table_v2(results: &[TestResult], crate_name: &str, display_
     let summary = summarize_results(results);
     println!("Summary:");
     println!("  ✓ Passed:    {}", summary.passed);
-    println!("  ✗ Regressed: {}", summary.regressed);
+    println!("  ✗ Failed:    {}", summary.regressed);
     println!("  ⚠ Broken:    {}", summary.broken);
     println!("  ⊘ Skipped:   {}", summary.skipped);
     println!("  ⚡ Error:     {}", summary.error);
@@ -1004,10 +1050,19 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, display_ver
                         classify_version_outcome(outcome, baseline)
                     };
 
-                    let (status_label, color) = match status {
-                        VersionStatus::Passed => ("✓ PASSED", term::color::BRIGHT_GREEN),
-                        VersionStatus::Regressed => ("✗ REGRESS", term::color::BRIGHT_RED),
-                        VersionStatus::Broken => ("⚠ BROKEN", term::color::BRIGHT_YELLOW),
+                    let status_label = match status {
+                        VersionStatus::Passed => "✓ PASSED",
+                        VersionStatus::Regressed => {
+                            // Build specific failure label
+                            let failure_type = get_failure_type(&outcome.result);
+                            Box::leak(format!("✗ {}", failure_type).into_boxed_str()) as &str
+                        },
+                        VersionStatus::Broken => "⚠ BROKEN",
+                    };
+                    let color = match status {
+                        VersionStatus::Passed => term::color::BRIGHT_GREEN,
+                        VersionStatus::Regressed => term::color::BRIGHT_RED,
+                        VersionStatus::Broken => term::color::BRIGHT_YELLOW,
                     };
 
                     print_colored_row_ict(status_label, &name, &version_label, &ict_marks, &duration, color);
@@ -1038,7 +1093,7 @@ pub fn print_console_table(results: &[TestResult], crate_name: &str, display_ver
     let summary = summarize_results(results);
     println!("Summary:");
     println!("  ✓ Passed:    {}", summary.passed);
-    println!("  ✗ Regressed: {}", summary.regressed);
+    println!("  ✗ Failed:    {}", summary.regressed);
     println!("  ⚠ Broken:    {}", summary.broken);
     println!("  ⊘ Skipped:   {}", summary.skipped);
     println!("  ⚡ Error:     {}", summary.error);
@@ -1253,7 +1308,30 @@ pub fn export_markdown_report(
 /// Export a regression to markdown format
 fn export_regression_markdown(file: &mut File, result: &TestResult) -> Result<(), Error> {
     writeln!(file, "### {} v{}\n", result.rev_dep.name, result.rev_dep.vers)?;
-    writeln!(file, "**Status**: ❌ REGRESSED")?;
+
+    // Determine specific failure type from the four_step data
+    let status = if let TestResultData::Regressed(four_step) = &result.data {
+        // Determine which step failed in override
+        if let Some(ref check) = four_step.override_check {
+            if check.failed() {
+                "❌ FAILED CHECK"
+            } else if let Some(ref test) = four_step.override_test {
+                if test.failed() {
+                    "❌ FAILED TEST"
+                } else {
+                    "❌ FAILED"  // fallback
+                }
+            } else {
+                "❌ FAILED"  // fallback
+            }
+        } else {
+            "❌ FAILED FETCH"  // No check means fetch failed
+        }
+    } else {
+        "❌ FAILED"  // fallback for non-regressed results
+    };
+
+    writeln!(file, "**Status**: {}", status)?;
     writeln!(file, "**Crates.io**: https://crates.io/crates/{}", result.rev_dep.name)?;
     if let Some(ref resolved) = result.rev_dep.resolved_version {
         writeln!(file, "**Depends On**: {}\n", resolved)?;

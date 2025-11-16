@@ -480,9 +480,6 @@ struct TestResult {
 
 #[derive(Debug)]
 enum TestResultData {
-    Passed(compile::FourStepResult),
-    Regressed(compile::FourStepResult),
-    Broken(compile::FourStepResult),
     Skipped(String), // Skipped with reason (e.g., version incompatibility)
     Error(Error),
     // Phase 5: Multi-version result
@@ -736,9 +733,6 @@ impl TestResult {
 
     fn quick_str(&self) -> &'static str {
         match self.data {
-            TestResultData::Passed(..) => "passed",
-            TestResultData::Regressed(..) => "regressed",
-            TestResultData::Broken(_) => "broken",
             TestResultData::Skipped(_) => "skipped",
             TestResultData::Error(_) => "error",
             TestResultData::MultiVersion(ref outcomes) => {
@@ -1716,9 +1710,6 @@ fn report_quick_result(current_num: usize, total: usize, result: &TestResult) {
                result.rev_dep.vers
                );
         let color = match result.data {
-            TestResultData::Passed(..) => term::color::BRIGHT_GREEN,
-            TestResultData::Regressed(..) => term::color::BRIGHT_RED,
-            TestResultData::Broken(_) => term::color::BRIGHT_YELLOW,
             TestResultData::Skipped(_) => term::color::BRIGHT_CYAN,
             TestResultData::Error(_) => term::color::BRIGHT_MAGENTA,
             TestResultData::MultiVersion(_) => term::color::BRIGHT_GREEN, // TODO: Compute worst status

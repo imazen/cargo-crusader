@@ -10,7 +10,7 @@ use crate::error_extract::{Diagnostic, parse_cargo_json};
 
 /// Restore Cargo.toml from the original backup before testing
 /// This prevents contamination between test runs in the cached staging directory
-fn restore_cargo_toml(staging_path: &Path) -> Result<(), String> {
+pub fn restore_cargo_toml(staging_path: &Path) -> Result<(), String> {
     let cargo_toml = staging_path.join("Cargo.toml");
     let original = staging_path.join("Cargo.toml.original.txt");
 
@@ -123,7 +123,33 @@ fn verify_dependency_version(
         }
     };
 
-    // Check packages array for the dependency
+    // First try resolve.nodes to find the actually-used version (handles multiple versions correctly)
+    if let Some(resolve) = metadata.get("resolve") {
+        if let Some(nodes) = resolve.get("nodes").and_then(|n| n.as_array()) {
+            for node in nodes {
+                if let Some(deps) = node.get("deps").and_then(|d| d.as_array()) {
+                    for dep in deps {
+                        if let Some(name) = dep.get("name").and_then(|n| n.as_str()) {
+                            if name == dep_name {
+                                if let Some(pkg) = dep.get("pkg").and_then(|p| p.as_str()) {
+                                    // pkg format: "registry+https://...#crate-name@version" or "path+file://...#crate-name@version"
+                                    // Extract version by splitting on "#" then "@"
+                                    if let Some(after_hash) = pkg.split('#').nth(1) {
+                                        if let Some(version) = after_hash.split('@').nth(1) {
+                                            debug!("✓ Verified {} version: {}", dep_name, version);
+                                            return Some(version.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: Check packages array for the dependency (may pick wrong version if multiple exist)
     let packages = match metadata.get("packages").and_then(|p| p.as_array()) {
         Some(p) => p,
         None => {
@@ -487,82 +513,6 @@ pub struct VersionTestResult {
     pub result: ThreeStepResult,
 }
 
-/// Four-step test result for a dependent crate
-#[derive(Debug, Clone)]
-pub struct FourStepResult {
-    pub baseline_check: CompileResult,
-    pub baseline_test: Option<CompileResult>,
-    pub override_check: Option<CompileResult>,
-    pub override_test: Option<CompileResult>,
-}
-
-impl FourStepResult {
-    /// Determine if this represents a regression
-    pub fn is_regressed(&self) -> bool {
-        // Baseline must pass
-        if !self.baseline_check.success {
-            return false;
-        }
-        if let Some(ref test) = self.baseline_test {
-            if !test.success {
-                return false;
-            }
-        }
-
-        // Override must have at least one failure
-        if let Some(ref check) = self.override_check {
-            if !check.success {
-                return true;
-            }
-        }
-        if let Some(ref test) = self.override_test {
-            if !test.success {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Determine if this represents a passing result
-    pub fn is_passed(&self) -> bool {
-        // All executed steps must pass
-        if !self.baseline_check.success {
-            return false;
-        }
-        if let Some(ref test) = self.baseline_test {
-            if !test.success {
-                return false;
-            }
-        }
-        if let Some(ref check) = self.override_check {
-            if !check.success {
-                return false;
-            }
-        }
-        if let Some(ref test) = self.override_test {
-            if !test.success {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    /// Determine if this represents a broken baseline
-    pub fn is_broken(&self) -> bool {
-        if !self.baseline_check.success {
-            return true;
-        }
-        if let Some(ref test) = self.baseline_test {
-            if !test.success {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 /// Run three-step ICT (Install/Check/Test) test with early stopping
 ///
 /// # Arguments
@@ -713,101 +663,6 @@ pub fn run_three_step_ict(
     })
 }
 
-/// Run all four build steps: baseline check, baseline test, override check, override test
-/// (Legacy function for backwards compatibility - new code should use run_three_step_ict)
-///
-/// # Arguments
-/// * `crate_path` - Path to the dependent crate
-/// * `base_crate_name` - Name of the crate being overridden
-/// * `baseline_path` - Path to baseline version (or None for published)
-/// * `override_path` - Path to work-in-progress version
-/// * `skip_check` - Skip cargo check steps
-/// * `skip_test` - Skip cargo test steps
-pub fn run_four_step_test(
-    crate_path: &Path,
-    base_crate_name: &str,
-    baseline_path: Option<&Path>,
-    override_path: &Path,
-    skip_check: bool,
-    skip_test: bool,
-) -> Result<FourStepResult, String> {
-    debug!("running four-step test for {:?}", crate_path);
-
-    let baseline_spec = baseline_path.map(|p| (base_crate_name, p));
-    let override_spec = Some((base_crate_name, override_path));
-
-    // Step 1: Baseline check
-    let baseline_check = if !skip_check {
-        compile_crate(crate_path, CompileStep::Check, baseline_spec)?
-    } else {
-        // If skipping check, create a dummy success result
-        CompileResult {
-            step: CompileStep::Check,
-            success: true,
-            stdout: String::new(),
-            stderr: "(skipped)".to_string(),
-            duration: Duration::from_secs(0),
-            diagnostics: Vec::new(),
-        }
-    };
-
-    if baseline_check.failed() {
-        // Baseline check failed - this is BROKEN, don't continue
-        return Ok(FourStepResult {
-            baseline_check,
-            baseline_test: None,
-            override_check: None,
-            override_test: None,
-        });
-    }
-
-    // Step 2: Baseline test
-    let baseline_test = if !skip_test {
-        let result = compile_crate(crate_path, CompileStep::Test, baseline_spec)?;
-        if result.failed() {
-            // Baseline test failed - this is BROKEN, don't continue
-            return Ok(FourStepResult {
-                baseline_check,
-                baseline_test: Some(result),
-                override_check: None,
-                override_test: None,
-            });
-        }
-        Some(result)
-    } else {
-        None
-    };
-
-    // Step 3: Override check
-    let override_check = if !skip_check {
-        Some(compile_crate(crate_path, CompileStep::Check, override_spec)?)
-    } else {
-        None
-    };
-
-    // Step 4: Override test (only if check passed or was skipped)
-    let override_test = if !skip_test {
-        let should_run_test = match &override_check {
-            Some(check) => check.success,
-            None => true, // check was skipped
-        };
-
-        if should_run_test {
-            Some(compile_crate(crate_path, CompileStep::Test, override_spec)?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    Ok(FourStepResult {
-        baseline_check,
-        baseline_test,
-        override_check,
-        override_test,
-    })
-}
 
 #[cfg(test)]
 mod tests {
