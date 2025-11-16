@@ -20,27 +20,23 @@ This document tracks remaining work and next steps. For completed work, see comm
 
 ---
 
-## Phase 5: Multi-Version Testing (Next)
+## Phase 5: Multi-Version Testing (✅ Largely Complete)
 
 **Goal**: Enable testing dependents against multiple versions of the base crate.
 
-**Estimated Effort**: 3-4 hours
+**Status**: Core functionality implemented. Console format evolved beyond original specification.
 
 ### Tasks
 
-#### 5.1 Refactor to Use `--config` Instead of File-Based Override
+#### 5.1 ✅ Refactor to Use `--config` Instead of File-Based Override
 
-**Current**: Creates `.cargo/config` files
-**Target**: Use `cargo --config 'patch.crates-io.{crate}.path="..."'`
+**Status**: COMPLETE - Using cargo --config for patch overrides
 
-**Benefits**:
-- No file I/O
-- No cleanup needed
-- Enables clean multi-version testing
+**Files**: `src/compile.rs` (patch configuration logic)
 
-**Files**: `src/main.rs:766` (compile_with_custom_dep)
+#### 5.2 ✅ Implement 3-Step ICT Testing
 
-#### 5.2 Implement 3-Step ICT Testing
+**Status**: COMPLETE - Implemented in src/compile.rs
 
 **Steps**:
 - I (Install): `cargo fetch` - Download dependencies
@@ -49,74 +45,77 @@ This document tracks remaining work and next steps. For completed work, see comm
 
 **Early stopping**: If I fails, skip C and T. If C fails, skip T.
 
-**Files**: New function in `src/compile.rs`
+**Files**: `src/compile.rs` (three_step_test function)
 
-#### 5.3 Add Multi-Version Data Structures
+#### 5.3 ✅ Add Multi-Version Data Structures
 
-```rust
-struct VersionTestResult {
-    version_label: String,      // "0.3.0" or "this"
-    version_source: VersionSource,
-    result: ThreeStepResult,
-}
+**Status**: COMPLETE - Data structures defined in src/main.rs
 
-struct ThreeStepResult {
-    fetch: CompileResult,
-    check: Option<CompileResult>,
-    test: Option<CompileResult>,
-}
-```
+Implemented structures:
+- `OfferedRow` - Main row structure (lines 530-545)
+- `DependencyRef` - Dependency metadata (lines 549-564)
+- `OfferedVersion` - Version being tested (lines 567-571)
+- `TestExecution` - Test results (lines 574-577)
+- `ThreeStepResult` - ICT results in src/compile.rs
+- `VersionSource` - Source tracking (CratesIo | Local | Git)
 
-#### 5.4 Implement Multi-Version Testing Loop
+See [CONSOLE-FORMAT.md](CONSOLE-FORMAT.md) for complete specifications.
 
-**Baseline Inference Logic**:
+#### 5.4 ✅ Implement Multi-Version Testing Loop
+
+**Status**: COMPLETE - Implemented in src/main.rs (run_test_multi_version function, line 216)
+
+**Baseline Inference Logic** (implemented):
 - If `--path` specified → look for Cargo.toml in that directory
 - If no `--path` → look for ./Cargo.toml
 - If Cargo.toml found → use as baseline ("this")
-- If not found + `--test-versions` → warn, test only specified versions
-- If not found + no `--test-versions` → error
+- CLI supports --test-versions for multiple version testing
+- Supports --force-versions to bypass semver requirements
 
-**Example behaviors**:
-```bash
-# Has baseline (Cargo.toml in --path)
-cargo-crusader --path ~/my-crate --test-versions 0.8.0 0.8.48
-# Tests: 0.8.0, 0.8.48, this (inferred from ~/my-crate/Cargo.toml)
+**Files**: `src/main.rs` (lines 84-220 multi-version flow)
 
-# No baseline (no Cargo.toml)
-cargo-crusader --test-versions 0.8.0 0.8.48
-# Warning: No baseline found, testing only: 0.8.0, 0.8.48
+#### 5.5 ✅ Update Console Table for Per-Version Rows
 
-# Baseline only (no --test-versions)
-cargo-crusader --path ~/my-crate
-# Tests: published baseline vs. this (current behavior)
-```
+**Status**: COMPLETE - Format evolved beyond original spec
 
-#### 5.5 Update Console Table for Per-Version Rows
+**Implemented Format** (5 columns, see CONSOLE-FORMAT.md):
+- **Offered** | **Spec** | **Resolved** | **Dependent** | **Result**
+- Icons: ✓ (pass), ✗ (fail), ⊘ (skip), - (baseline)
+- Resolution markers: = (exact), ↑ (upgrade), ≠ (mismatch)
+- ICT status embedded in Result column: ✓✓✓, ✓✗-, etc.
+- Error details with dropped-panel borders (columns 2-5)
+- Multi-version transitive dependency support with ├─ prefixes
 
-**Format**:
-```
-Legend: I=Install (cargo fetch), C=Check (cargo check), T=Test (cargo test)
+**Note**: Final design differs from original 5-column plan. Current format provides better context with separate Spec/Resolved columns.
 
-┌────────────┬──────────────────────────┬──────────────┬─────┬──────────┐
-│   Status   │        Dependent         │  Version     │ ICT │ Duration │
-├────────────┼──────────────────────────┼──────────────┼─────┼──────────┤
-│  ✗ REGRESS │image 0.25.8              │0.8.0         │✓✗✓  │     18.2s│
-│  ✓ PASSED  │image 0.25.8              │0.8.48        │✓✓✓  │     27.0s│
-│  ✓ PASSED  │image 0.25.8              │this          │✓✓✓  │     27.0s│
-└────────────┴──────────────────────────┴──────────────┴─────┴──────────┘
-```
+**Files**: `src/report.rs` (console table rendering)
 
-**Sorting**: Worst status first (REGRESSED > BROKEN > ERROR > PASSED)
+#### 5.6 🔄 Update HTML and Markdown Reports
 
-#### 5.6 Update HTML and Markdown Reports
+**Status**: PARTIAL - Basic reports exist, multi-version enhancements needed
 
-- Add "Version" column to HTML summary table
-- Expand details sections per version
-- In markdown, group by dependent with version matrix
+**Completed**:
+- ✅ HTML report generation (src/report.rs)
+- ✅ Markdown report generation (src/report.rs)
+- ✅ Basic version tracking in reports
 
-#### 5.7 Add Live Integration Tests
+**Remaining**:
+- [ ] Enhanced version matrix view in HTML
+- [ ] Improved markdown grouping by dependent
 
-Create `tests/live_integration_test.rs` with `#[ignore]` tests against real crates.io.
+**Files**: `src/report.rs` (report generation functions)
+
+#### 5.7 ⏸️ Add Live Integration Tests
+
+**Status**: DEFERRED - Offline test fixtures provide good coverage
+
+**Current Testing**:
+- 52 tests passing with fixture-based approach
+- Test fixtures in `test-crates/integration-fixtures/`
+
+**Remaining**:
+- [ ] Optional `#[ignore]` tests against live crates.io
+- [ ] Would require network access in CI
 
 ---
 

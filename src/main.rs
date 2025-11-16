@@ -114,6 +114,19 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
                     }
                 }
                 _ => {
+                    // Validate it's a concrete version, not a version requirement
+                    if ver_str.starts_with('^') || ver_str.starts_with('~') || ver_str.starts_with('=') {
+                        return Err(Error::InvalidVersion(format!(
+                            "Version requirement '{}' not allowed in --test-versions. Use concrete versions like '0.8.52'",
+                            ver_str
+                        )));
+                    }
+
+                    // Validate it's a valid semver version
+                    if let Err(e) = Version::parse(ver_str) {
+                        return Err(Error::SemverError(e));
+                    }
+
                     // Literal version string (supports hyphens like "0.8.2-alpha2")
                     compile::VersionSource::Published(ver_str.clone())
                 }
@@ -149,6 +162,19 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
                     }
                 }
                 _ => {
+                    // Validate it's a concrete version, not a version requirement
+                    if ver_str.starts_with('^') || ver_str.starts_with('~') || ver_str.starts_with('=') {
+                        return Err(Error::InvalidVersion(format!(
+                            "Version requirement '{}' not allowed in --force-versions. Use concrete versions like '0.8.52'",
+                            ver_str
+                        )));
+                    }
+
+                    // Validate it's a valid semver version
+                    if let Err(e) = Version::parse(ver_str) {
+                        return Err(Error::SemverError(e));
+                    }
+
                     compile::VersionSource::Published(ver_str.clone())
                 }
             };
@@ -242,8 +268,8 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     for (i, result_rx) in result_rxs.into_iter().enumerate() {
         let result = result_rx.recv();
 
-        // Print quick status line
-        report_quick_result(i + 1, total, &result);
+        // Status line removed - redundant with table output
+        // report_quick_result(i + 1, total, &result);
 
         // Convert to OfferedRows and stream print
         let rows = result.to_offered_rows();
@@ -1058,7 +1084,8 @@ fn run_multi_version_test(
     dependent_version: Option<String>,
     mut test_versions: Vec<compile::VersionSource>,
 ) -> TestResult {
-    status(&format!("testing crate {} (multi-version)", rev_dep));
+    // Status line removed - redundant with table output
+    // status(&format!("testing crate {} (multi-version)", rev_dep));
 
     // Resolve dependent version
     let mut rev_dep = match resolve_rev_dep_version(rev_dep.clone(), dependent_version) {
@@ -1145,20 +1172,34 @@ fn run_multi_version_test(
     for (idx, version_source) in test_versions.iter().enumerate() {
         debug!("[{}/{}] Testing {} against version {}", idx + 1, test_versions.len(), rev_dep.name, version_source.label());
 
-        // For published versions, download and unpack them for patching
-        let override_path = match &version_source {
-            compile::VersionSource::Local(path) => {
-                // If path points to Cargo.toml, extract directory
-                let dir_path = if path.ends_with("Cargo.toml") {
-                    path.parent().unwrap().to_path_buf()
-                } else {
-                    path.clone()
-                };
-                debug!("Using local version path: {:?}", dir_path);
-                Some(dir_path)
+        // Check if this is the baseline (first version and matches baseline_version)
+        let is_baseline = idx == 0 && baseline_version.is_some() && {
+            if let compile::VersionSource::Published(ref ver) = version_source {
+                Some(ver.as_str()) == baseline_version.as_deref()
+            } else {
+                false
             }
-            compile::VersionSource::Published(version) => {
-                match download_and_unpack_base_crate_version(
+        };
+
+        // For baseline: no download, no patch - test as-is
+        // For offered versions: download and patch
+        let override_path = if is_baseline {
+            debug!("Testing baseline version {} without patching", version_source.label());
+            None  // Let cargo handle baseline naturally
+        } else {
+            match &version_source {
+                compile::VersionSource::Local(path) => {
+                    // If path points to Cargo.toml, extract directory
+                    let dir_path = if path.ends_with("Cargo.toml") {
+                        path.parent().unwrap().to_path_buf()
+                    } else {
+                        path.clone()
+                    };
+                    debug!("Using local version path: {:?}", dir_path);
+                    Some(dir_path)
+                }
+                compile::VersionSource::Published(version) => {
+                    match download_and_unpack_base_crate_version(
                     &config.crate_name,
                     version,
                     &config.staging_dir,
@@ -1167,8 +1208,8 @@ fn run_multi_version_test(
                     Err(e) => {
                         status(&format!("Warning: Failed to download {} {}: {}", config.crate_name, version, e));
                         // Create a failed outcome
-                        let expected_version_str = parse_version_from_requirement(version);
-                        let is_forced = config.force_versions.contains(&expected_version_str);
+                        // version is already validated as concrete semver at input time
+                        let is_forced = config.force_versions.contains(version);
 
                         let failed_result = compile::ThreeStepResult {
                             fetch: compile::CompileResult {
@@ -1182,7 +1223,7 @@ fn run_multi_version_test(
                             check: None,
                             test: None,
                             actual_version: None,
-                            expected_version: Some(expected_version_str),
+                            expected_version: Some(version.to_string()),
                             forced_version: is_forced,
                             original_requirement: original_requirement.clone(),
                         };
@@ -1193,6 +1234,7 @@ fn run_multi_version_test(
                         continue;
                     }
                 }
+                }
             }
         };
 
@@ -1202,9 +1244,9 @@ fn run_multi_version_test(
         // Determine expected version for verification and if it's forced
         let (expected_version, is_forced) = match &version_source {
             compile::VersionSource::Published(v) => {
-                let version_str = parse_version_from_requirement(v);
-                let forced = config.force_versions.contains(&version_str);
-                (Some(version_str), forced)
+                // v is already validated as concrete semver at input time
+                let forced = config.force_versions.contains(v);
+                (Some(v.clone()), forced)
             }
             compile::VersionSource::Local(_) => (None, true), // Always force local versions (WIP, likely breaks semver)
         };
@@ -1607,21 +1649,6 @@ fn get_crate_handle(rev_dep: &RevDep) -> Result<CrateHandle, Error> {
     return Ok(CrateHandle(crate_file));
 }
 
-/// Parse a version string that might be a version requirement (like "^0.8.0")
-/// and extract just the version part
-fn parse_version_from_requirement(version_str: &str) -> String {
-    // Remove common version requirement prefixes
-    let cleaned = version_str
-        .trim()
-        .trim_start_matches('^')
-        .trim_start_matches('~')
-        .trim_start_matches('=')
-        .trim();
-
-    debug!("Parsed '{}' from requirement '{}'", cleaned, version_str);
-    cleaned.to_string()
-}
-
 /// Download and unpack a specific version of the base crate for patching
 /// Returns the path to the unpacked source
 fn download_and_unpack_base_crate_version(
@@ -1631,11 +1658,9 @@ fn download_and_unpack_base_crate_version(
 ) -> Result<PathBuf, Error> {
     debug!("Downloading and unpacking {} version {}", crate_name, version);
 
-    // Parse version requirement if needed (e.g., "^0.8.0" -> "0.8.0")
-    let clean_version = parse_version_from_requirement(version);
-
+    // version is already validated as concrete semver at input time
     // Create a pseudo-RevDep for downloading
-    let vers = Version::parse(&clean_version)
+    let vers = Version::parse(version)
         .map_err(|e| Error::SemverError(e))?;
     let pseudo_dep = RevDep {
         name: RevDepName::from(crate_name.to_string()),
@@ -1647,11 +1672,11 @@ fn download_and_unpack_base_crate_version(
     let crate_handle = get_crate_handle(&pseudo_dep)?;
 
     // Unpack to staging directory
-    let unpack_path = staging_dir.join(format!("base-{}-{}", crate_name, clean_version));
+    let unpack_path = staging_dir.join(format!("base-{}-{}", crate_name, version));
     if !unpack_path.exists() {
         fs::create_dir_all(&unpack_path)?;
         crate_handle.unpack_source_to(&unpack_path)?;
-        debug!("Unpacked {} {} to {:?}", crate_name, clean_version, unpack_path);
+        debug!("Unpacked {} {} to {:?}", crate_name, version, unpack_path);
     } else {
         debug!("Using cached base crate at {:?}", unpack_path);
     }
@@ -1841,6 +1866,7 @@ enum Error {
     FromUtf8Error(FromUtf8Error),
     ProcessError(String),
     InvalidPath(PathBuf),
+    InvalidVersion(String),
 }
 
 macro_rules! convert_error {
@@ -1878,7 +1904,8 @@ impl fmt::Display for Error {
             Error::NoCrateVersions => write!(f, "crate has no published versions"),
             Error::FromUtf8Error(ref e) => write!(f, "UTF-8 conversion error: {}", e),
             Error::ProcessError(ref s) => write!(f, "process error: {}", s),
-            Error::InvalidPath(ref p) => write!(f, "invalid path: {}", p.display())
+            Error::InvalidPath(ref p) => write!(f, "invalid path: {}", p.display()),
+            Error::InvalidVersion(ref s) => write!(f, "{}", s),
         }
     }
 }

@@ -283,112 +283,20 @@ Icons: ✓=passed ✗=failed ⊘=skipped -=baseline  📦=crates.io 📁=local
 
 ## Console Output Format
 
-The console table uses a five-column format that displays both baseline and offered versions, with each dependent showing:
-1. **Offered column**: Status icon + resolution symbol + version (or "baseline")
-2. **Spec column**: Dependency requirement (e.g., `^0.8.52`) or forced spec (e.g., `→ =0.8.91`)
-3. **Resolved column**: What cargo actually selected (e.g., `0.8.91 📁`)
-4. **Dependent column**: Crate name and version being tested
-5. **Result column**: Overall status + ICT marks + duration
+The console table uses a **five-column format** that displays both baseline and offered versions:
 
-### OfferedRow Data Structure
+**Columns**: Offered | Spec | Resolved | Dependent | Result
 
-```rust
-pub struct OfferedRow {
-    /// Baseline test result: None = this IS baseline, Some(bool) = baseline exists and passed/failed
-    pub baseline_passed: Option<bool>,
+**Key Features**:
+- Baseline rows (published version) vs. offered rows (WIP/test version)
+- Status icons: ✓ (passed), ✗ (failed/regressed), ⊘ (skipped), - (baseline)
+- Resolution markers: = (exact), ↑ (upgrade), ≠ (mismatch/forced)
+- ICT status (Install/Check/Test): ✓✓✓, ✓✗-, etc.
+- Source indicators: 📦 (crates.io), 📁 (local), 🔀 (git)
+- Error details with dropped-panel borders spanning columns 2-5
+- Multi-version transitive dependency trees with ├─ prefixes
 
-    /// Primary dependency being tested (depth 0)
-    pub primary: DependencyRef,
-
-    /// Version offered for testing (None for baseline rows)
-    pub offered: Option<OfferedVersion>,
-
-    /// Test execution results for primary dependency
-    pub test: TestExecution,
-
-    /// Transitive dependencies using different versions (depth > 0)
-    pub transitive: Vec<TransitiveTest>,
-}
-
-pub struct DependencyRef {
-    pub dependent_name: String,       // "image"
-    pub dependent_version: String,    // "0.25.8"
-    pub spec: String,                 // "^0.8.52" (what they require)
-    pub resolved_version: String,     // "0.8.91" (what cargo chose)
-    pub resolved_source: VersionSource,  // CratesIo | Local | Git
-}
-
-pub struct OfferedVersion {
-    pub version: String,  // "this(0.8.91)" or "0.8.51"
-    pub forced: bool,     // true shows [≠→!] suffix
-}
-
-pub struct TestExecution {
-    pub commands: Vec<TestCommand>,  // fetch, check, test
-}
-
-pub struct TestCommand {
-    pub command: CommandType,  // Fetch | Check | Test
-    pub features: Vec<String>,
-    pub result: CommandResult,
-}
-
-pub struct CommandResult {
-    pub passed: bool,
-    pub duration: f64,
-    pub failures: Vec<CrateFailure>,  // Which crate(s) failed
-}
-```
-
-### Status Icon Logic
-
-The icon in the Offered column indicates what actually happened during testing:
-
-```rust
-match (tested, baseline_passed, test_passed) {
-    (false, _, _) => "⊘",              // Skipped
-    (true, Some(true), true) => "✓",   // PASSED
-    (true, Some(true), false) => "✗",  // REGRESSED
-    (true, Some(false), _) => "✗",     // BROKEN (both failed)
-    (true, None, true) => "✓",         // PASSED (no baseline)
-    (true, None, false) => "✗",        // FAILED (no baseline)
-}
-```
-
-### Resolution Symbol Logic
-
-The symbol after the status icon shows how cargo resolved the version:
-
-```rust
-if skipped {
-    if semver_compatible { "↑" } else { "≠" }
-} else if forced {
-    "≠"
-} else if offered == resolved {
-    "="
-} else {
-    "≠"
-}
-```
-
-### Border Handling for Errors
-
-When tests fail, error details are displayed with special border handling:
-- Error text spans columns 2-5 (entire middle section)
-- Above error: borders drop with corners `├──────────┘` and `└─────────────────────┘`
-- Error lines: only outer vertical borders (far left and far right)
-- Below error: full borders restored with `├──────────┬─────────────────┬─────────────────┬─────────────────┤`
-
-Example:
-```
-│ ✗ =this(0.8.91)    │ ^0.8.52  │ 0.8.91 📁       │ image 0.25.8        │ REGRESSED ✓✗-  1.8s │
-│                    ├──────────┘                  └─────────────────────┘                    │
-│                    │ cargo check failed on image:0.25.8                                     │
-│                    │   • error[E0425]: cannot find value `foo`                              │
-│                    ├──────────┬─────────────────┬─────────────────────┬─────────────────────┤
-```
-
-**See [CONSOLE-FORMAT.md](CONSOLE-FORMAT.md) for complete format specification with all demo scenarios.**
+**See [CONSOLE-FORMAT.md](CONSOLE-FORMAT.md) for complete format specification, data structures, rendering logic, and 9 demo scenarios.**
 
 ## Module Dependencies
 

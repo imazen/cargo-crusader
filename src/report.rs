@@ -137,9 +137,6 @@ pub fn print_table_header(crate_name: &str, display_version: &str, total_deps: u
     println!("  this = {} (your work-in-progress version)", display_version);
     println!("{}", "=".repeat(99));
     println!();
-    println!("Legend: I=Install (cargo fetch), C=Check (cargo check), T=Test (cargo test)");
-    println!("Icons: ✓=passed ✗=failed ⊘=skipped -=baseline  📦=crates.io 📁=local 🔀=git");
-    println!();
 
     // Print table header
     println!("┌{:─<width1$}┬{:─<width2$}┬{:─<width3$}┬{:─<width4$}┬{:─<width5$}┐",

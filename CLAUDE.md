@@ -28,55 +28,14 @@ cargo test
 
 ## Core Data Structures
 
-### OfferedRow (Console Output)
-```rust
-pub struct OfferedRow {
-    /// Baseline test result: None = this IS baseline, Some(bool) = baseline exists and passed/failed
-    pub baseline_passed: Option<bool>,
+See **[CONSOLE-FORMAT.md](CONSOLE-FORMAT.md)** for complete data structure definitions:
+- `OfferedRow` - Top-level row structure with baseline tracking
+- `DependencyRef` - Primary dependency metadata
+- `OfferedVersion` - Version being tested
+- `TestExecution` - Test command results (fetch/check/test)
+- `TransitiveTest` - Multi-version transitive dependencies
 
-    /// Primary dependency being tested (depth 0)
-    pub primary: DependencyRef,
-
-    /// Version offered for testing (None for baseline rows)
-    pub offered: Option<OfferedVersion>,
-
-    /// Test execution results for primary dependency
-    pub test: TestExecution,
-
-    /// Transitive dependencies using different versions (depth > 0)
-    pub transitive: Vec<TransitiveTest>,
-}
-
-pub struct DependencyRef {
-    pub dependent_name: String,       // "image"
-    pub dependent_version: String,    // "0.25.8"
-    pub spec: String,                 // "^0.8.52" (what they require)
-    pub resolved_version: String,     // "0.8.91" (what cargo chose)
-    pub resolved_source: VersionSource,  // CratesIo | Local | Git
-    pub used_offered_version: bool,
-}
-
-pub struct OfferedVersion {
-    pub version: String,  // "this(0.8.91)" or "0.8.51"
-    pub forced: bool,     // true shows [≠→!] suffix
-}
-
-pub struct TestExecution {
-    pub commands: Vec<TestCommand>,  // fetch, check, test
-}
-
-pub struct TestCommand {
-    pub command: CommandType,  // Fetch | Check | Test
-    pub features: Vec<String>,
-    pub result: CommandResult,
-}
-
-pub struct CommandResult {
-    pub passed: bool,
-    pub duration: f64,
-    pub failures: Vec<CrateFailure>,  // Which crate(s) failed
-}
-```
+Implementation: `src/main.rs` (lines 530-600)
 
 ## Architecture
 
