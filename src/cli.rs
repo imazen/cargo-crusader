@@ -20,11 +20,13 @@ pub struct CliArgs {
 
     /// Explicitly test these crates from crates.io (supports "name:version" syntax)
     /// Examples: "image", "image:0.25.8"
-    #[arg(long, value_name = "CRATE[:VERSION]")]
+    /// Can specify multiple: --dependents image serde tokio
+    #[arg(long, value_name = "CRATE[:VERSION]", num_args = 1..)]
     pub dependents: Vec<String>,
 
     /// Test local crates at these paths
-    #[arg(long, value_name = "PATH")]
+    /// Can specify multiple: --dependent-paths ./crate1 ./crate2
+    #[arg(long, value_name = "PATH", num_args = 1..)]
     pub dependent_paths: Vec<PathBuf>,
 
     /// Test against specific versions of the base crate (e.g., "0.3.0 4.1.1")
