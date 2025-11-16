@@ -7,6 +7,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use crate::{OfferedRow, DependencyRef, OfferedVersion, TestExecution, TestCommand, CommandType, CommandResult, CrateFailure, TransitiveTest, VersionSource};
 use term::color::Color;
+use unicode_width::{UnicodeWidthStr, UnicodeWidthChar};
+use terminal_size::{Width, terminal_size};
+use lazy_static::lazy_static;
 
 //
 // Rendering Model Types
@@ -124,49 +127,97 @@ impl OfferedCell {
 //
 
 // Column widths for the 5-column table
-const W_OFFERED: usize = 20;
-const W_SPEC: usize = 10;
-const W_RESOLVED: usize = 17;
-const W_DEPENDENT: usize = 21;
-const W_RESULT: usize = 21;
+#[derive(Clone, Copy)]
+struct TableWidths {
+    offered: usize,
+    spec: usize,
+    resolved: usize,
+    dependent: usize,
+    result: usize,
+    total: usize,  // Total table width including borders
+}
+
+impl TableWidths {
+    fn new(terminal_width: usize) -> Self {
+        // Borders: │ = 6 characters (1 before each column + 1 at end)
+        let borders = 6;
+        let available = terminal_width.saturating_sub(borders);
+
+        // Distribute widths proportionally
+        // Original ratios: 20:10:17:21:21 = total 89
+        // Percentages: 22.5%, 11.2%, 19.1%, 23.6%, 23.6%
+        let offered = (available * 225) / 1000;
+        let spec = (available * 112) / 1000;
+        let resolved = (available * 191) / 1000;
+        let dependent = (available * 236) / 1000;
+        let result = available - offered - spec - resolved - dependent;  // Remainder
+
+        TableWidths {
+            offered,
+            spec,
+            resolved,
+            dependent,
+            result,
+            total: terminal_width,
+        }
+    }
+}
+
+/// Get terminal width or default to 120
+fn get_terminal_width() -> usize {
+    if let Some((Width(w), _)) = terminal_size() {
+        w as usize
+    } else {
+        120  // Default width
+    }
+}
+
+// Calculate table widths once at startup
+lazy_static! {
+    static ref WIDTHS: TableWidths = TableWidths::new(get_terminal_width());
+}
 
 /// Print table header
 pub fn print_table_header(crate_name: &str, display_version: &str, total_deps: usize) {
-    println!("\n{}", "=".repeat(99));
+    let term_width = get_terminal_width();
+    println!("\n{}", "=".repeat(term_width));
     println!("Testing {} reverse dependencies of {}", total_deps, crate_name);
     println!("  this = {} (your work-in-progress version)", display_version);
-    println!("{}", "=".repeat(99));
+    println!("{}", "=".repeat(term_width));
     println!();
 
     // Print table header
+    let w = &*WIDTHS;
     println!("┌{:─<width1$}┬{:─<width2$}┬{:─<width3$}┬{:─<width4$}┬{:─<width5$}┐",
              "", "", "", "", "",
-             width1 = W_OFFERED, width2 = W_SPEC, width3 = W_RESOLVED,
-             width4 = W_DEPENDENT, width5 = W_RESULT);
+             width1 = w.offered, width2 = w.spec, width3 = w.resolved,
+             width4 = w.dependent, width5 = w.result);
     println!("│{:^width1$}│{:^width2$}│{:^width3$}│{:^width4$}│{:^width5$}│",
              "Offered", "Spec", "Resolved", "Dependent", "Result         Time",
-             width1 = W_OFFERED, width2 = W_SPEC, width3 = W_RESOLVED,
-             width4 = W_DEPENDENT, width5 = W_RESULT);
+             width1 = w.offered, width2 = w.spec, width3 = w.resolved,
+             width4 = w.dependent, width5 = w.result);
     println!("├{:─<width1$}┼{:─<width2$}┼{:─<width3$}┼{:─<width4$}┼{:─<width5$}┤",
              "", "", "", "", "",
-             width1 = W_OFFERED, width2 = W_SPEC, width3 = W_RESOLVED,
-             width4 = W_DEPENDENT, width5 = W_RESULT);
+             width1 = w.offered, width2 = w.spec, width3 = w.resolved,
+             width4 = w.dependent, width5 = w.result);
 }
 
 /// Print separator line between dependents
 pub fn print_separator_line() {
+    let w = &*WIDTHS;
     println!("├{:─<width1$}┼{:─<width2$}┼{:─<width3$}┼{:─<width4$}┼{:─<width5$}┤",
              "", "", "", "", "",
-             width1 = W_OFFERED, width2 = W_SPEC, width3 = W_RESOLVED,
-             width4 = W_DEPENDENT, width5 = W_RESULT);
+             width1 = w.offered, width2 = w.spec, width3 = w.resolved,
+             width4 = w.dependent, width5 = w.result);
 }
 
 /// Print table footer
 pub fn print_table_footer() {
+    let w = &*WIDTHS;
     println!("└{:─<width1$}┴{:─<width2$}┴{:─<width3$}┴{:─<width4$}┴{:─<width5$}┘",
              "", "", "", "", "",
-             width1 = W_OFFERED, width2 = W_SPEC, width3 = W_RESOLVED,
-             width4 = W_DEPENDENT, width5 = W_RESULT);
+             width1 = w.offered, width2 = w.spec, width3 = w.resolved,
+             width4 = w.dependent, width5 = w.result);
 }
 
 /// Print an OfferedRow using the standard table format
@@ -174,13 +225,16 @@ pub fn print_offered_row(row: &OfferedRow, is_last_in_group: bool) {
     // Convert OfferedRow to column strings
     let (offered_str, spec_str, resolved_str, dependent_str, result_str, time_str, color, error_details, multi_version_rows) = format_offered_row(row);
 
+    // Use dynamic widths
+    let w = &*WIDTHS;
+
     // Print main row
-    let offered_display = truncate_with_padding(&offered_str, W_OFFERED - 2);
-    let spec_display = truncate_with_padding(&spec_str, W_SPEC - 2);
-    let resolved_display = truncate_with_padding(&resolved_str, W_RESOLVED - 2);
-    let dependent_display = truncate_with_padding(&dependent_str, W_DEPENDENT - 2);
+    let offered_display = truncate_with_padding(&offered_str, w.offered - 2);
+    let spec_display = truncate_with_padding(&spec_str, w.spec - 2);
+    let resolved_display = truncate_with_padding(&resolved_str, w.resolved - 2);
+    let dependent_display = truncate_with_padding(&dependent_str, w.dependent - 2);
     let result_display = format!("{:>12} {:>5}", result_str, time_str);
-    let result_display = truncate_with_padding(&result_display, W_RESULT - 2);
+    let result_display = truncate_with_padding(&result_display, w.result - 2);
 
     // Print main row with color
     if let Some(ref mut t) = term::stdout() {
@@ -199,44 +253,44 @@ pub fn print_offered_row(row: &OfferedRow, is_last_in_group: bool) {
 
     // Print error details with dropped-panel border (if any)
     if !error_details.is_empty() {
-        let error_text_width = 99 - 1 - W_OFFERED - 1 - 1 - 1 - 1;
-        let corner1_width = W_SPEC;
-        let corner2_width = W_DEPENDENT;
-        let padding_width = 52 - corner1_width - corner2_width;
+        let error_text_width = w.total - 1 - w.offered - 1 - 1 - 1 - 1;
+        let corner1_width = w.spec;
+        let corner2_width = w.dependent;
+        let padding_width = w.spec + w.resolved + w.dependent + 2 - corner1_width - corner2_width;
 
         println!("│{:w_offered$}├{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│",
                  "", "", "", "", "",
-                 w_offered = W_OFFERED, corner1 = corner1_width,
-                 padding = padding_width, corner2 = corner2_width, w_result = W_RESULT);
+                 w_offered = w.offered, corner1 = corner1_width,
+                 padding = padding_width, corner2 = corner2_width, w_result = w.result);
 
         for error_line in &error_details {
             let truncated = truncate_with_padding(error_line, error_text_width);
             println!("│{:w_offered$}│ {} │",
                      "", truncated,
-                     w_offered = W_OFFERED);
+                     w_offered = w.offered);
         }
 
         if !is_last_in_group {
             println!("│{:w_offered$}├{:─<w_spec$}┬{:─<w_resolved$}┬{:─<w_dependent$}┬{:─<w_result$}┤",
                      "", "", "", "", "",
-                     w_offered = W_OFFERED, w_spec = W_SPEC, w_resolved = W_RESOLVED,
-                     w_dependent = W_DEPENDENT, w_result = W_RESULT);
+                     w_offered = w.offered, w_spec = w.spec, w_resolved = w.resolved,
+                     w_dependent = w.dependent, w_result = w.result);
         }
     }
 
     // Print multi-version rows with ├─ prefixes (if any)
     if !multi_version_rows.is_empty() {
-        for (i, (spec, resolved, dependent)) in multi_version_rows.iter().enumerate() {
+        for (_i, (spec, resolved, dependent)) in multi_version_rows.iter().enumerate() {
             let spec_display = format!("├─ {}", spec);
-            let spec_display = truncate_with_padding(&spec_display, W_SPEC - 2);
+            let spec_display = truncate_with_padding(&spec_display, w.spec - 2);
             let resolved_display = format!("├─ {}", resolved);
-            let resolved_display = truncate_with_padding(&resolved_display, W_RESOLVED - 2);
+            let resolved_display = truncate_with_padding(&resolved_display, w.resolved - 2);
             let dependent_display = format!("├─ {}", dependent);
-            let dependent_display = truncate_with_padding(&dependent_display, W_DEPENDENT - 2);
+            let dependent_display = truncate_with_padding(&dependent_display, w.dependent - 2);
 
-            println!("│{:w$}│ {} │ {} │ {} │{:w_result$}│",
+            println!("│{:width$}│ {} │ {} │ {} │{:w_result$}│",
                      "", spec_display, resolved_display, dependent_display, "",
-                     w = W_OFFERED, w_result = W_RESULT);
+                     width = w.offered, w_result = w.result);
         }
     }
 }
@@ -377,18 +431,8 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 
 /// Count the display width of a string, accounting for wide Unicode characters
 fn display_width(s: &str) -> usize {
-    s.chars().map(|c| {
-        if c.is_ascii() {
-            1
-        } else {
-            // Approximate: most emoji are 2 cells wide
-            match c {
-                '✓' | '✗' | '⊘' | '↑' | '≠' | '→' | '=' => 1,
-                '📦' | '📁' | '🔀' => 2,
-                _ => 1,
-            }
-        }
-    }).sum()
+    // Use unicode-width crate for accurate width calculation
+    UnicodeWidthStr::width(s)
 }
 
 /// Truncate and pad string to exact width
@@ -405,13 +449,7 @@ fn truncate_with_padding(s: &str, width: usize) -> String {
         let target_width = if width >= 3 { width - 3 } else { width };
 
         for c in chars.iter() {
-            let c_width = if c.is_ascii() { 1 } else {
-                match c {
-                    '✓' | '✗' | '⊘' | '↑' | '≠' | '→' | '=' => 1,
-                    '📦' | '📁' | '🔀' => 2,
-                    _ => 1,
-                }
-            };
+            let c_width = UnicodeWidthChar::width(*c).unwrap_or(1);
 
             if current_width + c_width > target_width {
                 break;
