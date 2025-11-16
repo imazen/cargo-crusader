@@ -256,7 +256,7 @@ pub fn print_offered_row(row: &OfferedRow, is_last_in_group: bool) {
         let error_text_width = w.total - 1 - w.offered - 1 - 1 - 1 - 1;
         let corner1_width = w.spec;
         let corner2_width = w.dependent;
-        let padding_width = w.spec + w.resolved + w.dependent + 2 - corner1_width - corner2_width;
+        let padding_width = w.spec + w.resolved + w.dependent  - corner1_width - corner2_width;
 
         println!("│{:w_offered$}├{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│",
                  "", "", "", "", "",
@@ -505,6 +505,76 @@ pub fn summarize_offered_rows(rows: &[OfferedRow]) -> TestSummary {
                 (Some(false), _) => broken += 1,        // BROKEN
                 (None, true) => passed += 1,            // PASSED (no baseline)
                 (None, false) => broken += 1,           // FAILED (no baseline)
+            }
+        }
+    }
+
+    TestSummary {
+        passed,
+        regressed,
+        broken,
+        total: passed + regressed + broken,
+    }
+}
+
+/// Summarize TestResults into counts
+pub fn summarize_results(results: &[crate::TestResult]) -> TestSummary {
+    let mut passed = 0;
+    let mut regressed = 0;
+    let mut broken = 0;
+
+    for result in results {
+        match &result.data {
+            crate::TestResultData::Skipped(_) => {
+                // Skip counting skipped tests
+            }
+            crate::TestResultData::Error(_) => {
+                broken += 1;
+            }
+            crate::TestResultData::MultiVersion(ref outcomes) => {
+                // Baseline is the first outcome
+                let baseline = outcomes.first();
+
+                let mut has_regressed = false;
+                let mut has_broken = false;
+
+                for (idx, outcome) in outcomes.iter().enumerate() {
+                    if idx == 0 {
+                        // Baseline - if it fails, mark as broken
+                        if !outcome.result.is_success() {
+                            has_broken = true;
+                        }
+                    } else {
+                        // Offered version - classify based on baseline
+                        if !outcome.result.is_success() {
+                            if let Some(base) = baseline {
+                                if base.result.is_success() {
+                                    has_regressed = true;
+                                } else {
+                                    has_broken = true;
+                                }
+                            } else {
+                                has_broken = true;
+                            }
+                        } else {
+                            // Offered version passed
+                            if let Some(base) = baseline {
+                                if base.result.is_success() {
+                                    // Don't count yet - only count if ALL offered versions pass
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Count based on worst outcome
+                if has_regressed {
+                    regressed += 1;
+                } else if has_broken {
+                    broken += 1;
+                } else {
+                    passed += 1;
+                }
             }
         }
     }

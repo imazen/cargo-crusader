@@ -1282,21 +1282,15 @@ fn run_multi_version_test(
             Some(&test_label),
         ) {
             Ok(result) => {
-                // Check for version mismatch
+                // Version mismatch is shown in table with [≠→!] suffix, no need for separate warning
                 if let (Some(ref expected), Some(ref actual)) = (&result.expected_version, &result.actual_version) {
                     if actual != expected {
-                        status(&format!(
-                            "⚠️  VERSION MISMATCH: Expected {} but cargo resolved to {}!",
-                            expected, actual
-                        ));
+                        debug!("⚠️  VERSION MISMATCH: Expected {} but cargo resolved to {}!", expected, actual);
                     } else {
                         debug!("✓ Version verified: {} = {}", expected, actual);
                     }
                 } else if result.expected_version.is_some() && result.actual_version.is_none() {
-                    status(&format!(
-                        "⚠️  Could not verify version for {} (cargo tree failed)",
-                        config.crate_name
-                    ));
+                    debug!("⚠️  Could not verify version for {} (cargo tree failed)", config.crate_name);
                 }
 
                 outcomes.push(VersionTestOutcome {
@@ -1831,6 +1825,8 @@ fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, conf
                 .unwrap_or_else(|| PathBuf::from("crusader-analysis.md"));
 
             let display_version = config.display_version();
+
+            // TODO: Capture console output and write to markdown
             match report::export_markdown_report(&results, &markdown_path, &config.crate_name, &display_version) {
                 Ok(_) => {
                     println!("Markdown report: {}", markdown_path.display());
@@ -1840,20 +1836,10 @@ fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, conf
                 }
             }
 
-            // Generate HTML report
-            match report::export_html_report(results, &args.output, &config.crate_name, &display_version) {
-                Ok(summary) => {
-                    println!("HTML report: {}", args.output.display());
-                    println!();
-
-                    // Exit with error if there were regressions
-                    if summary.regressed > 0 {
-                        std::process::exit(-2);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error generating HTML report: {}", e);
-                }
+            // Exit with error if there were regressions
+            let summary = report::summarize_results(&results);
+            if summary.regressed > 0 {
+                std::process::exit(-2);
             }
         }
         Err(e) => {
