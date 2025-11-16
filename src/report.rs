@@ -143,14 +143,23 @@ impl TableWidths {
         let borders = 6;
         let available = terminal_width.saturating_sub(borders);
 
-        // Distribute widths proportionally
-        // Original ratios: 20:10:17:21:21 = total 89
-        // Percentages: 22.5%, 11.2%, 19.1%, 23.6%, 23.6%
-        let offered = (available * 225) / 1000;
-        let spec = (available * 112) / 1000;
-        let resolved = (available * 191) / 1000;
-        let dependent = (available * 236) / 1000;
-        let result = available - offered - spec - resolved - dependent;  // Remainder
+        // Use fixed widths for columns with known/predictable values
+        // Offered: "✗ ≠0.8.91-preview [≠→!]" max ~28 chars
+        let offered = 25;
+        // Spec: "^0.8.52" or "→ =this" max ~12 chars
+        let spec = 12;
+        // Resolved: "0.8.91-preview 📦" max ~18 chars
+        let resolved = 18;
+        // Result: "REGRESSED ✓✗  1.3s" fixed ~20 chars
+        let result = 25;
+
+        // Dependent gets remaining space (for long crate names)
+        let fixed_total = offered + spec + resolved + result;
+        let dependent = if available > fixed_total {
+            available - fixed_total
+        } else {
+            20  // Minimum fallback
+        };
 
         TableWidths {
             offered,
