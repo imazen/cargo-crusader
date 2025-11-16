@@ -87,6 +87,10 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     // Phase 5: Check if we're doing multi-version testing
     let use_multi_version = !args.test_versions.is_empty() || !args.force_versions.is_empty();
 
+    // Track which "this" versions are forced
+    // Auto-added WIP is forced by default, explicitly specified ones check the list
+    let mut force_local = args.force_versions.iter().any(|v| v == "this");
+
     // Build list of versions to test (Phase 5)
     let test_versions: Option<Vec<compile::VersionSource>> = if use_multi_version {
         let mut versions = Vec::new();
@@ -94,6 +98,16 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
         // Add specified versions from --test-versions, resolving keywords
         for ver_str in &args.test_versions {
             let version_source = match ver_str.as_str() {
+                "this" => {
+                    // User explicitly requested WIP in patch mode (non-forced)
+                    if let CrateOverride::Source(ref manifest_path) = config.next_override {
+                        debug!("Resolved 'this' to local WIP (non-forced)");
+                        compile::VersionSource::Local(manifest_path.clone())
+                    } else {
+                        status("Warning: 'this' specified but no local source available (--path or --crate)");
+                        continue;
+                    }
+                }
                 "latest" => {
                     // Resolve to latest stable version
                     match resolve_latest_version(&config.crate_name, false) {
@@ -144,6 +158,16 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
         // Add versions from --force-versions (these will be marked as forced in run_multi_version_test)
         for ver_str in &args.force_versions {
             let version_source = match ver_str.as_str() {
+                "this" => {
+                    // User explicitly requested WIP in force mode
+                    if let CrateOverride::Source(ref manifest_path) = config.next_override {
+                        debug!("Resolved 'this' to local WIP (forced)");
+                        compile::VersionSource::Local(manifest_path.clone())
+                    } else {
+                        status("Warning: 'this' specified but no local source available (--path or --crate)");
+                        continue;
+                    }
+                }
                 "latest" => {
                     match resolve_latest_version(&config.crate_name, false) {
                         Ok(ver) => {
@@ -188,10 +212,20 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
             versions.push(version_source);
         }
 
-        // Add "this" (local WIP) or "latest" if no local version
+        // Auto-add "this" (local WIP) in forced mode if not already specified
+        // Default: --test-versions baseline --force-versions this
         if let CrateOverride::Source(ref manifest_path) = config.next_override {
-            debug!("Adding 'this' version from {:?}", manifest_path);
-            versions.push(compile::VersionSource::Local(manifest_path.clone()));
+            // Check if "this" is already in the list
+            let this_already_added = versions.iter().any(|v| {
+                matches!(v, compile::VersionSource::Local(_))
+            });
+
+            if !this_already_added {
+                debug!("Auto-adding 'this' version from {:?} (forced by default)", manifest_path);
+                versions.push(compile::VersionSource::Local(manifest_path.clone()));
+                // Mark auto-added WIP as forced
+                force_local = true;
+            }
         } else {
             // No local version (only --crate), add "latest" as final version
             match resolve_latest_version(&config.crate_name, false) {
@@ -207,6 +241,9 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
 
         Some(versions)
     } else {
+        // No --test-versions or --force-versions specified
+        // Default behavior: test baseline (auto-inferred) + this (forced)
+        force_local = true;
         None
     };
 
@@ -262,7 +299,7 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
             versions
         });
 
-        let result = run_test_multi_version(pool, config.clone(), rev_dep, version, versions);
+        let result = run_test_multi_version(pool, config.clone(), rev_dep, version, versions, force_local);
         result_rxs.push(result);
     }
 
@@ -299,6 +336,22 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     // Print summary
     let summary = report::summarize_offered_rows(&all_rows);
     report::print_summary(&summary);
+
+    // Generate markdown report
+    let markdown_path = PathBuf::from("crusader-report.md");
+    match report::export_markdown_table_report(&all_rows, &markdown_path, &config.crate_name, &config.display_version(), total) {
+        Ok(_) => {
+            println!("Markdown report: {}", markdown_path.display());
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to generate markdown report: {}", e);
+        }
+    }
+
+    // Exit with error code if there were regressions
+    if summary.regressed > 0 {
+        std::process::exit(-2);
+    }
 
     // For now, still return TestResults for compatibility
     // TODO: Eventually remove this and just work with OfferedRows
@@ -758,9 +811,16 @@ impl TestResult {
                             passed: outcome.result.fetch.success,
                             duration: outcome.result.fetch.duration.as_secs_f64(),
                             failures: if !outcome.result.fetch.success {
+                                let error_msg = error_extract::extract_error_summary(&outcome.result.fetch.diagnostics);
+                                let error_msg = if !error_msg.is_empty() {
+                                    error_msg
+                                } else {
+                                    // Fallback to stderr if no error diagnostics
+                                    outcome.result.fetch.stderr.clone()
+                                };
                                 vec![CrateFailure {
                                     crate_name: self.rev_dep.name.clone(),
-                                    error_message: outcome.result.fetch.stderr.clone(),
+                                    error_message: error_msg,
                                 }]
                             } else {
                                 vec![]
@@ -777,9 +837,16 @@ impl TestResult {
                                 passed: check.success,
                                 duration: check.duration.as_secs_f64(),
                                 failures: if !check.success {
+                                    let error_msg = error_extract::extract_error_summary(&check.diagnostics);
+                                    let error_msg = if !error_msg.is_empty() {
+                                        error_msg
+                                    } else {
+                                        // Fallback to stderr if no error diagnostics
+                                        check.stderr.clone()
+                                    };
                                     vec![CrateFailure {
                                         crate_name: self.rev_dep.name.clone(),
-                                        error_message: check.stderr.clone(),
+                                        error_message: error_msg,
                                     }]
                                 } else {
                                     vec![]
@@ -797,9 +864,16 @@ impl TestResult {
                                 passed: test.success,
                                 duration: test.duration.as_secs_f64(),
                                 failures: if !test.success {
+                                    let error_msg = error_extract::extract_error_summary(&test.diagnostics);
+                                    let error_msg = if !error_msg.is_empty() {
+                                        error_msg
+                                    } else {
+                                        // Fallback to stderr if no error diagnostics
+                                        test.stderr.clone()
+                                    };
                                     vec![CrateFailure {
                                         crate_name: self.rev_dep.name.clone(),
-                                        error_message: test.stderr.clone(),
+                                        error_message: error_msg,
                                     }]
                                 } else {
                                     vec![]
@@ -967,10 +1041,11 @@ fn run_test_multi_version(
     rev_dep: RevDepName,
     version: Option<String>,
     test_versions: Vec<compile::VersionSource>,
+    force_local: bool,
 ) -> TestResultReceiver {
     let (result_tx, result_rx) = new_result_receiver(rev_dep.clone());
     pool.execute(move || {
-        let res = run_multi_version_test(&config, rev_dep, version, test_versions);
+        let res = run_multi_version_test(&config, rev_dep, version, test_versions, force_local);
         result_tx.send(res).unwrap();
     });
 
@@ -1126,6 +1201,7 @@ fn run_multi_version_test(
     rev_dep: RevDepName,
     dependent_version: Option<String>,
     mut test_versions: Vec<compile::VersionSource>,
+    force_local: bool,  // Whether local "this" versions should be forced
 ) -> TestResult {
     // Status line removed - redundant with table output
     // status(&format!("testing crate {} (multi-version)", rev_dep));
@@ -1296,7 +1372,12 @@ fn run_multi_version_test(
                     let forced = config.force_versions.contains(v);
                     (Some(v.clone()), forced)
                 }
-                compile::VersionSource::Local(_) => (None, true), // Always force local versions (WIP, likely breaks semver)
+                compile::VersionSource::Local(_) => {
+                    // Local WIP: use force_local flag
+                    // true if: "this" in --force-versions OR auto-added (default)
+                    // false if: "this" in --test-versions (explicitly non-forced)
+                    (None, force_local)
+                }
             }
         };
 
@@ -1855,34 +1936,12 @@ fn report_quick_result(current_num: usize, total: usize, result: &TestResult) {
 fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, config: &Config) {
     match res {
         Ok(results) => {
-            // Print console table (new five-column format)
-            report::print_console_table_v2(&results, &config.crate_name, &config.display_version());
+            // Console table is already printed in streaming mode during run_tests()
+            // No need to print again here
 
-            // Generate markdown analysis report
-            let markdown_path = args.output.with_extension("").with_extension("md")
-                .file_name()
-                .and_then(|f| f.to_str())
-                .map(|f| f.replace(".html", "-analysis"))
-                .map(|f| PathBuf::from(format!("{}.md", f)))
-                .unwrap_or_else(|| PathBuf::from("crusader-analysis.md"));
-
-            let display_version = config.display_version();
-
-            // TODO: Capture console output and write to markdown
-            match report::export_markdown_report(&results, &markdown_path, &config.crate_name, &display_version) {
-                Ok(_) => {
-                    println!("Markdown report: {}", markdown_path.display());
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to generate markdown report: {}", e);
-                }
-            }
-
-            // Exit with error if there were regressions
-            let summary = report::summarize_results(&results);
-            if summary.regressed > 0 {
-                std::process::exit(-2);
-            }
+            // Note: Markdown report generation disabled for now
+            // The table is already printed to console in streaming mode
+            // TODO: Capture console output and write to markdown file
         }
         Err(e) => {
             report_error(e);

@@ -393,11 +393,13 @@ fn format_offered_row(row: &OfferedRow) -> (String, String, String, String, Stri
             };
             for failure in &cmd.result.failures {
                 error_details.push(format!("cargo {} failed on {}", cmd_name, failure.crate_name));
-                // Add error message if not empty
+                // Add error message if not empty (already formatted by extract_error_summary)
                 if !failure.error_message.is_empty() {
-                    let lines: Vec<&str> = failure.error_message.lines().take(5).collect();
-                    for line in lines {
-                        error_details.push(format!("  • {}", line));
+                    // Split into lines and display each with bullet
+                    for line in failure.error_message.lines().take(10) {
+                        if !line.trim().is_empty() {
+                            error_details.push(format!("  {}", line));
+                        }
                     }
                 }
             }
@@ -727,10 +729,113 @@ pub fn print_console_table_v2(_results: &[crate::TestResult], _crate_name: &str,
     println!("Use: print_table_header(), print_offered_row(), print_table_footer()");
 }
 
+/// Generate markdown report with console table in code block
+pub fn export_markdown_table_report(rows: &[OfferedRow], output_path: &PathBuf, crate_name: &str, display_version: &str, total_deps: usize) -> std::io::Result<()> {
+    let mut file = File::create(output_path)?;
+    let summary = summarize_offered_rows(rows);
+
+    // Write markdown header
+    writeln!(file, "# Cargo Crusader Test Report\n")?;
+    writeln!(file, "**Crate**: {} ({})", crate_name, display_version)?;
+    writeln!(file, "**Dependents Tested**: {}\n", total_deps)?;
+
+    // Write summary
+    writeln!(file, "## Summary\n")?;
+    writeln!(file, "- ✓ Passed: {}", summary.passed)?;
+    writeln!(file, "- ✗ Regressed: {}", summary.regressed)?;
+    writeln!(file, "- ⚠ Broken: {}", summary.broken)?;
+    writeln!(file, "- **Total**: {}\n", summary.total)?;
+
+    // Write console table in code block
+    writeln!(file, "## Test Results\n")?;
+    writeln!(file, "```")?;
+
+    // Write table header
+    write!(file, "{}", format_table_header(crate_name, display_version, total_deps))?;
+
+    // Write all rows
+    for (i, row) in rows.iter().enumerate() {
+        // Determine if this is the last row in its group
+        // For simplicity, assume each row is its own group (no separators in markdown)
+        let is_last_in_group = true;
+
+        // Format the row (we need a string-returning version of print_offered_row)
+        write!(file, "{}", format_offered_row_string(row, is_last_in_group))?;
+    }
+
+    // Write table footer
+    write!(file, "{}", format_table_footer())?;
+
+    writeln!(file, "```\n")?;
+
+    Ok(())
+}
+
+/// Format an OfferedRow as a string (similar to print_offered_row but returns String)
+fn format_offered_row_string(row: &OfferedRow, is_last_in_group: bool) -> String {
+    let (offered_str, spec_str, resolved_str, dependent_str, result_str, time_str, _color, error_details, multi_version_rows) = format_offered_row(row);
+    let w = &*WIDTHS;
+
+    let mut output = String::new();
+
+    // Main row
+    let offered_display = truncate_with_padding(&offered_str, w.offered - 2);
+    let spec_display = truncate_with_padding(&spec_str, w.spec - 2);
+    let resolved_display = truncate_with_padding(&resolved_str, w.resolved - 2);
+    let dependent_display = truncate_with_padding(&dependent_str, w.dependent - 2);
+    let result_display = format!("{:>12} {:>5}", result_str, time_str);
+    let result_display = truncate_with_padding(&result_display, w.result - 2);
+
+    output.push_str(&format!("│ {} │ {} │ {} │ {} │ {} │\n",
+        offered_display, spec_display, resolved_display, dependent_display, result_display));
+
+    // Error details (if any)
+    if !error_details.is_empty() {
+        let error_text_width = w.total - 1 - w.offered - 1 - 1 - 1 - 1;
+        let corner1_width = w.spec;
+        let corner2_width = w.dependent;
+        let padding_width = w.spec + w.resolved + w.dependent - corner1_width - corner2_width;
+
+        output.push_str(&format!("│{:w_offered$}├{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│\n",
+            "", "", "", "", "",
+            w_offered = w.offered, corner1 = corner1_width,
+            padding = padding_width, corner2 = corner2_width, w_result = w.result));
+
+        for error_line in &error_details {
+            let truncated = truncate_with_padding(error_line, error_text_width);
+            output.push_str(&format!("│{:w_offered$}│ {} │\n", "", truncated, w_offered = w.offered));
+        }
+
+        if !is_last_in_group {
+            output.push_str(&format!("│{:w_offered$}├{:─<w_spec$}┬{:─<w_resolved$}┬{:─<w_dependent$}┬{:─<w_result$}┤\n",
+                "", "", "", "", "",
+                w_offered = w.offered, w_spec = w.spec, w_resolved = w.resolved,
+                w_dependent = w.dependent, w_result = w.result));
+        }
+    }
+
+    // Multi-version rows (if any)
+    if !multi_version_rows.is_empty() {
+        for (_i, (spec, resolved, dependent)) in multi_version_rows.iter().enumerate() {
+            let spec_display = format!("├─ {}", spec);
+            let spec_display = truncate_with_padding(&spec_display, w.spec - 2);
+            let resolved_display = format!("├─ {}", resolved);
+            let resolved_display = truncate_with_padding(&resolved_display, w.resolved - 2);
+            let dependent_display = format!("├─ {}", dependent);
+            let dependent_display = truncate_with_padding(&dependent_display, w.dependent - 2);
+
+            output.push_str(&format!("│{:width$}│ {} │ {} │ {} │{:w_result$}│\n",
+                "", spec_display, resolved_display, dependent_display, "",
+                width = w.offered, w_result = w.result));
+        }
+    }
+
+    output
+}
+
 /// Compatibility wrapper for old API
-pub fn export_markdown_report(rows: &[crate::TestResult], output_path: &PathBuf, crate_name: &str, display_version: &str) -> std::io::Result<()> {
-    // TODO: Convert TestResult to OfferedRow, then call generate_markdown_report
-    eprintln!("Warning: export_markdown_report needs TestResult -> OfferedRow conversion");
+pub fn export_markdown_report(_rows: &[crate::TestResult], _output_path: &PathBuf, _crate_name: &str, _display_version: &str) -> std::io::Result<()> {
+    // Deprecated - use export_markdown_table_report with OfferedRows instead
     Ok(())
 }
 

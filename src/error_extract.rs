@@ -176,39 +176,13 @@ fn format_diagnostic_text(msg: &CompilerMessage) -> String {
 }
 
 /// Extract just error messages for quick display
+/// Uses the rendered field which contains the full formatted error with code snippets
 pub fn extract_error_summary(diagnostics: &[Diagnostic]) -> String {
-    let errors: Vec<_> = diagnostics.iter()
+    diagnostics.iter()
         .filter(|d| d.level.is_error())
-        .collect();
-
-    if errors.is_empty() {
-        return String::new();
-    }
-
-    let mut summary = String::new();
-    for (i, diag) in errors.iter().enumerate() {
-        if i > 0 {
-            summary.push_str("\n\n");
-        }
-
-        if let Some(code) = &diag.code {
-            summary.push_str(&format!("error[{}]: {}\n", code, diag.message));
-        } else {
-            summary.push_str(&format!("error: {}\n", diag.message));
-        }
-
-        if let Some(span) = &diag.primary_span {
-            summary.push_str(&format!(
-                " --> {}:{}:{}\n",
-                span.file_name, span.line, span.column
-            ));
-            if let Some(label) = &span.label {
-                summary.push_str(&format!("  {}\n", label));
-            }
-        }
-    }
-
-    summary
+        .map(|d| d.rendered.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[cfg(test)]
