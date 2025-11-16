@@ -1002,11 +1002,30 @@ fn extract_resolved_version(rev_dep: &RevDep, crate_name: &str, staging_dir: &Pa
     // Verify Cargo.toml exists
     if crate_dir.join("Cargo.toml").exists() {
 
+        // IMPORTANT: Restore Cargo.toml from backup to ensure clean state
+        // Previous runs may have modified it with force-versions
+        let cargo_toml = crate_dir.join("Cargo.toml");
+        let backup = crate_dir.join(".Cargo.toml.backup");
+        if backup.exists() {
+            debug!("Restoring Cargo.toml from backup before extracting baseline version");
+            fs::copy(&backup, &cargo_toml)?;
+        }
+
         // Run cargo metadata to get resolved dependencies
-        let output = Command::new("cargo")
-            .args(&["metadata", "--format-version=1"])
+        // Try with --locked first, fallback to generating Cargo.lock if needed
+        let mut output = Command::new("cargo")
+            .args(&["metadata", "--format-version=1", "--locked"])
             .current_dir(&crate_dir)
             .output()?;
+
+        if !output.status.success() {
+            // If --locked failed (no Cargo.lock), try without it to generate one
+            debug!("cargo metadata --locked failed, trying without --locked");
+            output = Command::new("cargo")
+                .args(&["metadata", "--format-version=1"])
+                .current_dir(&crate_dir)
+                .output()?;
+        }
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1017,26 +1036,43 @@ fn extract_resolved_version(rev_dep: &RevDep, crate_name: &str, staging_dir: &Pa
                 debug!("Successfully parsed metadata JSON");
                 // Look through resolve.nodes for our dependency
                 if let Some(resolve) = metadata.get("resolve") {
+                    debug!("Found resolve section");
                     if let Some(nodes) = resolve.get("nodes").and_then(|n| n.as_array()) {
+                        debug!("Found {} nodes in resolve", nodes.len());
                         for node in nodes {
                             if let Some(deps) = node.get("deps").and_then(|d| d.as_array()) {
                                 for dep in deps {
                                     if let Some(name) = dep.get("name").and_then(|n| n.as_str()) {
                                         if name == crate_name {
+                                            debug!("Found {} in resolve.nodes!", crate_name);
                                             if let Some(pkg) = dep.get("pkg").and_then(|p| p.as_str()) {
-                                                // pkg format: "crate-name version (registry+...)"
-                                                // Extract version from between name and parenthesis
-                                                let parts: Vec<&str> = pkg.split_whitespace().collect();
-                                                if parts.len() >= 2 {
-                                                    return Ok(parts[1].to_string());
+                                                // pkg format: "SOURCE#crate-name@version"
+                                                // Examples:
+                                                //   "registry+https://github.com/rust-lang/crates.io-index#rgb@0.8.52"
+                                                //   "path+file:///home/user/crate#rgb@0.8.91"
+                                                debug!("pkg field: {}", pkg);
+
+                                                // Extract version from after @
+                                                if let Some(at_pos) = pkg.rfind('@') {
+                                                    let resolved_version = pkg[at_pos + 1..].to_string();
+                                                    debug!("Resolved {} to version: {}", crate_name, resolved_version);
+                                                    return Ok(resolved_version);
+                                                } else {
+                                                    debug!("No '@' found in pkg field");
                                                 }
+                                            } else {
+                                                debug!("No 'pkg' field in dep");
                                             }
                                         }
                                     }
                                 }
                             }
                         }
+                    } else {
+                        debug!("No nodes array in resolve");
                     }
+                } else {
+                    debug!("No resolve section in metadata");
                 }
 
                 // Fallback: check packages array for version requirement
@@ -1123,21 +1159,17 @@ fn run_multi_version_test(
     // Extract the original requirement spec from the dependent's Cargo.toml
     let original_requirement = extract_dependency_requirement(&rev_dep, &config.crate_name);
 
-    // Reorder versions: baseline first, then --test-versions, then this/latest
+    // Add baseline at the front (always non-forced)
+    // IMPORTANT: Don't remove duplicates - if user specified same version in --force-versions,
+    // we want to test it twice: once as baseline (non-forced), once as forced
     if let Some(ref baseline) = baseline_version {
         // Skip wildcard or star baselines
         if baseline != "*" && !baseline.is_empty() {
-            // Remove baseline from test_versions if it's already there
-            test_versions.retain(|v| {
-                if let compile::VersionSource::Published(ref ver) = v {
-                    ver != baseline && !baseline.starts_with(&format!("^{}", ver)) && !baseline.starts_with(&format!("~{}", ver))
-                } else {
-                    true
-                }
-            });
-
-            // Add baseline at the front
+            // Always insert baseline at position 0
+            // Even if the same version appears later in the list (from --force-versions),
+            // this baseline will be tested in non-forced mode
             test_versions.insert(0, compile::VersionSource::Published(baseline.clone()));
+            debug!("Inserted baseline {} at position 0 (will be non-forced)", baseline);
         }
     }
 
