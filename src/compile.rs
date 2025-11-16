@@ -1,12 +1,87 @@
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Write, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::env;
 use std::time::{Duration, Instant};
+use std::sync::Mutex;
 // TempDir not needed since we use persistent staging directories
 use log::debug;
 use crate::error_extract::{Diagnostic, parse_cargo_json};
+use fs2::FileExt;
+use lazy_static::lazy_static;
+
+// Failure log file path
+lazy_static! {
+    static ref FAILURE_LOG: Mutex<Option<PathBuf>> = Mutex::new(None);
+}
+
+/// Initialize the failure log file
+pub fn init_failure_log(log_path: PathBuf) {
+    let mut log = FAILURE_LOG.lock().unwrap();
+    *log = Some(log_path);
+}
+
+/// Log a compilation failure to the failure log file with proper locking
+pub fn log_failure(
+    dependent: &str,
+    dependent_version: &str,
+    base_crate: &str,
+    test_label: &str,  // "baseline", "WIP", or version number
+    command: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) {
+    let log_path = {
+        let log = FAILURE_LOG.lock().unwrap();
+        match &*log {
+            Some(path) => path.clone(),
+            None => return,  // Logging not initialized
+        }
+    };
+
+    // Open file with append mode
+    let file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to open failure log: {}", e);
+            return;
+        }
+    };
+
+    // Lock the file for exclusive write access
+    if let Err(e) = file.lock_exclusive() {
+        eprintln!("Failed to lock failure log: {}", e);
+        return;
+    }
+
+    // Write failure details
+    let mut writer = BufWriter::new(&file);
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+
+    let exit_str = exit_code.map(|c| c.to_string()).unwrap_or_else(|| "N/A".to_string());
+
+    let _ = writeln!(writer, "\n{}", "=".repeat(100));
+    let _ = writeln!(writer, "[{}] FAILURE: {} {} testing {} {}",
+                     timestamp, dependent, dependent_version, base_crate, test_label);
+    let _ = writeln!(writer, "{}", "=".repeat(100));
+    let _ = writeln!(writer, "Command: {}", command);
+    let _ = writeln!(writer, "Exit code: {}", exit_str);
+    let _ = writeln!(writer, "\n--- STDOUT ---");
+    let _ = writeln!(writer, "{}", stdout);
+    let _ = writeln!(writer, "\n--- STDERR ---");
+    let _ = writeln!(writer, "{}", stderr);
+    let _ = writeln!(writer, "{}", "=".repeat(100));
+
+    let _ = writer.flush();
+
+    // Unlock is automatic when file goes out of scope
+}
 
 /// Restore Cargo.toml from the original backup before testing
 /// This prevents contamination between test runs in the cached staging directory
@@ -536,6 +611,9 @@ pub fn run_three_step_ict(
     expected_version: Option<String>,
     force_versions: bool,
     original_requirement: Option<String>,
+    dependent_name: Option<&str>,  // For failure logging
+    dependent_version: Option<&str>,  // For failure logging
+    test_label: Option<&str>,  // For failure logging: "baseline", "WIP", or version
 ) -> Result<ThreeStepResult, String> {
     debug!("running three-step ICT for {:?} (force={}, expected_version={:?})", crate_path, force_versions, expected_version);
 
@@ -596,6 +674,20 @@ pub fn run_three_step_ict(
     };
 
     if fetch.failed() {
+        // Log failure
+        if let (Some(dep_name), Some(dep_ver), Some(label)) = (dependent_name, dependent_version, test_label) {
+            log_failure(
+                dep_name,
+                dep_ver,
+                base_crate_name,
+                label,
+                &format!("cargo fetch"),
+                None,
+                &fetch.stdout,
+                &fetch.stderr,
+            );
+        }
+
         // Fetch failed - stop here with dashes for remaining steps
         return Ok(ThreeStepResult {
             fetch,
@@ -612,6 +704,20 @@ pub fn run_three_step_ict(
     let check = if !skip_check {
         let result = compile_crate(crate_path, CompileStep::Check, override_spec)?;
         if result.failed() {
+            // Log failure
+            if let (Some(dep_name), Some(dep_ver), Some(label)) = (dependent_name, dependent_version, test_label) {
+                log_failure(
+                    dep_name,
+                    dep_ver,
+                    base_crate_name,
+                    label,
+                    &format!("cargo check"),
+                    None,
+                    &result.stdout,
+                    &result.stderr,
+                );
+            }
+
             // Check failed - stop here with dash for test
             return Ok(ThreeStepResult {
                 fetch,
@@ -643,6 +749,24 @@ pub fn run_three_step_ict(
     } else {
         None
     };
+
+    // Log test failure if test failed
+    if let Some(ref test_result) = test {
+        if test_result.failed() {
+            if let (Some(dep_name), Some(dep_ver), Some(label)) = (dependent_name, dependent_version, test_label) {
+                log_failure(
+                    dep_name,
+                    dep_ver,
+                    base_crate_name,
+                    label,
+                    &format!("cargo test"),
+                    None,
+                    &test_result.stdout,
+                    &test_result.stderr,
+                );
+            }
+        }
+    }
 
     // Cleanup: Restore Cargo.toml from backup if we modified it
     if let Some(backup) = backup_path {

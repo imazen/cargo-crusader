@@ -77,6 +77,13 @@ fn parse_dependent_spec(spec: &str) -> (String, Option<String>) {
 }
 
 fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
+    // Initialize failure log
+    let log_path = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("crusader-failures.log");
+    compile::init_failure_log(log_path.clone());
+    debug!("Failure log initialized at: {:?}", log_path);
+
     // Phase 5: Check if we're doing multi-version testing
     let use_multi_version = !args.test_versions.is_empty() || !args.force_versions.is_empty();
 
@@ -1251,6 +1258,16 @@ fn run_multi_version_test(
             compile::VersionSource::Local(_) => (None, true), // Always force local versions (WIP, likely breaks semver)
         };
 
+        // Create label for failure logging
+        let test_label = if is_baseline {
+            format!("baseline ({})", version_source.label())
+        } else {
+            match &version_source {
+                compile::VersionSource::Published(v) => format!("offered ({})", v),
+                compile::VersionSource::Local(_) => "offered (WIP)".to_string(),
+            }
+        };
+
         match compile::run_three_step_ict(
             &staging_path,
             &config.crate_name,
@@ -1260,6 +1277,9 @@ fn run_multi_version_test(
             expected_version,
             is_forced,
             original_requirement.clone(),
+            Some(&rev_dep.name),
+            Some(&rev_dep.vers.to_string()),
+            Some(&test_label),
         ) {
             Ok(result) => {
                 // Check for version mismatch
