@@ -213,26 +213,63 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     let mut result_rxs = Vec::new();
     let ref mut pool = ThreadPool::new(args.jobs);
     for (rev_dep, version) in rev_deps {
-        let result = if let Some(ref versions) = test_versions {
-            // Phase 5: Multi-version testing
-            run_test_multi_version(pool, config.clone(), rev_dep, version, versions.clone())
-        } else {
-            // Legacy: Single baseline vs override test
-            run_test(pool, config.clone(), rev_dep, version)
-        };
+        // Always use multi-version testing (legacy path removed)
+        // If --test-versions not specified, build vec with just "this" - baseline will be auto-inferred
+        let versions = test_versions.clone().unwrap_or_else(|| {
+            let mut versions = Vec::new();
+            // Add "this" (local WIP) or "latest" if no local version
+            if let CrateOverride::Source(ref manifest_path) = config.next_override {
+                versions.push(compile::VersionSource::Local(manifest_path.clone()));
+            } else {
+                // No local version (only --crate), add "latest" as final version
+                if let Ok(ver) = resolve_latest_version(&config.crate_name, false) {
+                    versions.push(compile::VersionSource::Published(ver));
+                }
+            }
+            versions
+        });
+
+        let result = run_test_multi_version(pool, config.clone(), rev_dep, version, versions);
         result_rxs.push(result);
     }
 
-    // Now wait for all the results and return them.
+    // Print table header for streaming output
     let total = result_rxs.len();
-    let results = result_rxs.into_iter().enumerate().map(|(i, r)| {
-        let r = r.recv();
-        report_quick_result(i + 1, total, &r);
-        r
-    });
-    let results = results.collect::<Vec<_>>();
+    report::print_table_header(&config.crate_name, &config.display_version(), total);
 
-    Ok(results)
+    // Stream results as they arrive
+    let mut all_rows = Vec::new();
+    for (i, result_rx) in result_rxs.into_iter().enumerate() {
+        let result = result_rx.recv();
+
+        // Print quick status line
+        report_quick_result(i + 1, total, &result);
+
+        // Convert to OfferedRows and stream print
+        let rows = result.to_offered_rows();
+        for (j, row) in rows.iter().enumerate() {
+            let is_last_in_group = j == rows.len() - 1;
+            report::print_offered_row(row, is_last_in_group);
+        }
+
+        // Print separator after each dependent
+        if i < total - 1 {
+            report::print_separator_line();
+        }
+
+        all_rows.extend(rows);
+    }
+
+    // Print table footer
+    report::print_table_footer();
+
+    // Print summary
+    let summary = report::summarize_offered_rows(&all_rows);
+    report::print_summary(&summary);
+
+    // For now, still return TestResults for compatibility
+    // TODO: Eventually remove this and just work with OfferedRows
+    Ok(vec![])
 }
 
 #[derive(Clone)]
@@ -615,6 +652,8 @@ pub enum VersionSource {
 }
 
 impl TestResult {
+    // TODO: Remove - FourStepResult no longer exists, using MultiVersion instead
+    /*
     fn from_four_step(rev_dep: RevDep, result: compile::FourStepResult) -> TestResult {
         let data = if result.is_broken() {
             TestResultData::Broken(result)
@@ -626,96 +665,179 @@ impl TestResult {
 
         TestResult { rev_dep, data }
     }
+    */
 
-    // Legacy constructors - now unified to return MultiVersion
-    fn passed(rev_dep: RevDep, r1: CompileResult, r2: CompileResult) -> TestResult {
-        // Convert to multi-version format with baseline + override
-        let baseline = VersionTestOutcome {
-            version_source: compile::VersionSource::Published(rev_dep.vers.to_string()),
-            result: compile::ThreeStepResult {
-                fetch: r1.clone(), // Use check result as placeholder for fetch
-                check: Some(r1.clone()),
-                test: Some(r1),
-                actual_version: rev_dep.resolved_version.clone(),
-                expected_version: rev_dep.resolved_version.clone(),
-                forced_version: false,
-                original_requirement: None,
-            },
-        };
+    /// Convert TestResult to OfferedRows for streaming output
+    fn to_offered_rows(&self) -> Vec<OfferedRow> {
+        match &self.data {
+            TestResultData::MultiVersion(outcomes) => {
+                let mut rows = Vec::new();
 
-        let override_version = VersionTestOutcome {
-            version_source: compile::VersionSource::Local(PathBuf::from(".")),
-            result: compile::ThreeStepResult {
-                fetch: r2.clone(),
-                check: Some(r2.clone()),
-                test: Some(r2),
-                actual_version: None, // WIP version
-                expected_version: None,
-                forced_version: false,
-                original_requirement: None,
-            },
-        };
+                // First outcome is always baseline
+                let baseline = outcomes.first();
 
-        TestResult {
-            rev_dep,
-            data: TestResultData::MultiVersion(vec![baseline, override_version])
+                for (idx, outcome) in outcomes.iter().enumerate() {
+                    let is_baseline = idx == 0;
+
+                    // Determine baseline_passed for this row
+                    let baseline_passed = if is_baseline {
+                        None  // This IS the baseline
+                    } else {
+                        baseline.map(|b| b.result.is_success())
+                    };
+
+                    // Convert compile::VersionSource to main::VersionSource
+                    let resolved_source = match &outcome.version_source {
+                        compile::VersionSource::Local(_) => VersionSource::Local,
+                        compile::VersionSource::Published(_) => VersionSource::CratesIo,
+                    };
+
+                    // Build primary DependencyRef
+                    let primary = DependencyRef {
+                        dependent_name: self.rev_dep.name.clone(),
+                        dependent_version: self.rev_dep.vers.to_string(),
+                        spec: outcome.result.original_requirement.clone().unwrap_or_else(|| "?".to_string()),
+                        resolved_version: outcome.result.actual_version.clone()
+                            .or(outcome.result.expected_version.clone())
+                            .unwrap_or_else(|| "?".to_string()),
+                        resolved_source,
+                        used_offered_version: outcome.result.expected_version == outcome.result.actual_version,
+                    };
+
+                    // Build OfferedVersion (None for baseline)
+                    let offered = if is_baseline {
+                        None
+                    } else {
+                        Some(OfferedVersion {
+                            version: outcome.version_source.label(),
+                            forced: outcome.result.forced_version,
+                        })
+                    };
+
+                    // Build TestExecution from ThreeStepResult
+                    let mut commands = Vec::new();
+
+                    // Fetch command
+                    commands.push(TestCommand {
+                        command: CommandType::Fetch,
+                        features: vec![],  // TODO: track features
+                        result: CommandResult {
+                            passed: outcome.result.fetch.success,
+                            duration: outcome.result.fetch.duration.as_secs_f64(),
+                            failures: if !outcome.result.fetch.success {
+                                vec![CrateFailure {
+                                    crate_name: self.rev_dep.name.clone(),
+                                    error_message: outcome.result.fetch.stderr.clone(),
+                                }]
+                            } else {
+                                vec![]
+                            },
+                        },
+                    });
+
+                    // Check command (if ran)
+                    if let Some(ref check) = outcome.result.check {
+                        commands.push(TestCommand {
+                            command: CommandType::Check,
+                            features: vec![],
+                            result: CommandResult {
+                                passed: check.success,
+                                duration: check.duration.as_secs_f64(),
+                                failures: if !check.success {
+                                    vec![CrateFailure {
+                                        crate_name: self.rev_dep.name.clone(),
+                                        error_message: check.stderr.clone(),
+                                    }]
+                                } else {
+                                    vec![]
+                                },
+                            },
+                        });
+                    }
+
+                    // Test command (if ran)
+                    if let Some(ref test) = outcome.result.test {
+                        commands.push(TestCommand {
+                            command: CommandType::Test,
+                            features: vec![],
+                            result: CommandResult {
+                                passed: test.success,
+                                duration: test.duration.as_secs_f64(),
+                                failures: if !test.success {
+                                    vec![CrateFailure {
+                                        crate_name: self.rev_dep.name.clone(),
+                                        error_message: test.stderr.clone(),
+                                    }]
+                                } else {
+                                    vec![]
+                                },
+                            },
+                        });
+                    }
+
+                    rows.push(OfferedRow {
+                        baseline_passed,
+                        primary,
+                        offered,
+                        test: TestExecution { commands },
+                        transitive: vec![],  // TODO: extract from cargo tree
+                    });
+                }
+
+                rows
+            }
+            TestResultData::Error(msg) => {
+                // Create a single failed row for errors
+                vec![OfferedRow {
+                    baseline_passed: None,
+                    primary: DependencyRef {
+                        dependent_name: self.rev_dep.name.clone(),
+                        dependent_version: self.rev_dep.vers.to_string(),
+                        spec: "ERROR".to_string(),
+                        resolved_version: "ERROR".to_string(),
+                        resolved_source: VersionSource::CratesIo,
+                        used_offered_version: false,
+                    },
+                    offered: None,
+                    test: TestExecution {
+                        commands: vec![TestCommand {
+                            command: CommandType::Fetch,
+                            features: vec![],
+                            result: CommandResult {
+                                passed: false,
+                                duration: 0.0,
+                                failures: vec![CrateFailure {
+                                    crate_name: self.rev_dep.name.clone(),
+                                    error_message: msg.to_string(),
+                                }],
+                            },
+                        }],
+                    },
+                    transitive: vec![],
+                }]
+            }
+            TestResultData::Skipped(reason) => {
+                // Create a single row for skipped
+                vec![OfferedRow {
+                    baseline_passed: None,
+                    primary: DependencyRef {
+                        dependent_name: self.rev_dep.name.clone(),
+                        dependent_version: self.rev_dep.vers.to_string(),
+                        spec: "SKIPPED".to_string(),
+                        resolved_version: reason.clone(),
+                        resolved_source: VersionSource::CratesIo,
+                        used_offered_version: false,
+                    },
+                    offered: None,
+                    test: TestExecution { commands: vec![] },
+                    transitive: vec![],
+                }]
+            }
         }
     }
 
-    fn regressed(rev_dep: RevDep, r1: CompileResult, r2: CompileResult) -> TestResult {
-        // Same as passed, but r2 failed
-        let baseline = VersionTestOutcome {
-            version_source: compile::VersionSource::Published(rev_dep.vers.to_string()),
-            result: compile::ThreeStepResult {
-                fetch: r1.clone(),
-                check: Some(r1.clone()),
-                test: Some(r1),
-                actual_version: rev_dep.resolved_version.clone(),
-                expected_version: rev_dep.resolved_version.clone(),
-                forced_version: false,
-                original_requirement: None,
-            },
-        };
-
-        let override_version = VersionTestOutcome {
-            version_source: compile::VersionSource::Local(PathBuf::from(".")),
-            result: compile::ThreeStepResult {
-                fetch: r2.clone(),
-                check: Some(r2.clone()),
-                test: Some(r2),
-                actual_version: None,
-                expected_version: None,
-                forced_version: false,
-                original_requirement: None,
-            },
-        };
-
-        TestResult {
-            rev_dep,
-            data: TestResultData::MultiVersion(vec![baseline, override_version])
-        }
-    }
-
-    fn broken(rev_dep: RevDep, r: CompileResult) -> TestResult {
-        // Only baseline, which failed
-        let baseline = VersionTestOutcome {
-            version_source: compile::VersionSource::Published(rev_dep.vers.to_string()),
-            result: compile::ThreeStepResult {
-                fetch: r.clone(),
-                check: if r.step == compile::CompileStep::Check { Some(r) } else { None },
-                test: None,
-                actual_version: rev_dep.resolved_version.clone(),
-                expected_version: rev_dep.resolved_version.clone(),
-                forced_version: false,
-                original_requirement: None,
-            },
-        };
-
-        TestResult {
-            rev_dep,
-            data: TestResultData::MultiVersion(vec![baseline])
-        }
-    }
+    // Legacy constructors removed (passed, regressed, broken) - only used by deleted run_test_local()
+    // Kept: skipped() and error() - still used by multi-version path
 
     fn skipped(rev_dep: RevDep, reason: String) -> TestResult {
         TestResult {
@@ -804,18 +926,7 @@ fn new_result_receiver(rev_dep: RevDepName) -> (Sender<TestResult>, TestResultRe
     (tx, fut)
 }
 
-fn run_test(pool: &mut ThreadPool,
-            config: Config,
-            rev_dep: RevDepName,
-            version: Option<String>) -> TestResultReceiver {
-    let (result_tx, result_rx) = new_result_receiver(rev_dep.clone());
-    pool.execute(move || {
-        let res = run_test_local(&config, rev_dep, version);
-        result_tx.send(res).unwrap();
-    });
-
-    return result_rx;
-}
+// Legacy run_test() removed - now always use run_test_multi_version()
 
 fn run_test_multi_version(
     pool: &mut ThreadPool,
@@ -930,72 +1041,7 @@ fn extract_resolved_version(rev_dep: &RevDep, crate_name: &str, staging_dir: &Pa
     Err(Error::ProcessError("Failed to extract resolved version via cargo metadata".to_string()))
 }
 
-fn run_test_local(config: &Config, rev_dep: RevDepName, version: Option<String>) -> TestResult {
-
-    status(&format!("testing crate {}", rev_dep));
-
-    // First, figure get the most recent version number (or use provided version)
-    let mut rev_dep = match resolve_rev_dep_version(rev_dep.clone(), version) {
-        Ok(r) => r,
-        Err(e) => {
-            let rev_dep = RevDep {
-                name: rev_dep,
-                vers: Version::parse("0.0.0").unwrap(),
-                resolved_version: None,
-            };
-            return TestResult::error(rev_dep, e);
-        }
-    };
-
-    // Extract the resolved version from the dependent's Cargo.lock
-    match extract_resolved_version(&rev_dep, &config.crate_name, &config.staging_dir) {
-        Ok(resolved) => {
-            debug!("Resolved version for {} -> {}: {}", rev_dep.name, config.crate_name, resolved);
-            rev_dep.resolved_version = Some(resolved);
-        }
-        Err(e) => {
-            debug!("Failed to extract resolved version for {}: {}", rev_dep.name, e);
-        }
-    }
-
-    // Check if the dependent's version requirement is compatible with our WIP version
-    match check_version_compatibility(&rev_dep, &config) {
-        Ok(true) => {
-            // Compatible, continue testing
-        }
-        Ok(false) => {
-            // Incompatible, skip testing
-            let reason = format!(
-                "Dependent requires version incompatible with {} v{}",
-                config.crate_name, config.version
-            );
-            return TestResult::skipped(rev_dep, reason);
-        }
-        Err(e) => {
-            debug!("Failed to check version compatibility: {}, testing anyway", e);
-            // Continue testing if we can't determine compatibility
-        }
-    }
-
-    let base_result = match compile_with_custom_dep(&rev_dep, &config.base_override, &config.crate_name, &config.staging_dir) {
-        Ok(r) => r,
-        Err(e) => return TestResult::error(rev_dep, e)
-    };
-
-    if base_result.failed() {
-        return TestResult::broken(rev_dep, base_result);
-    }
-    let next_result = match compile_with_custom_dep(&rev_dep, &config.next_override, &config.crate_name, &config.staging_dir) {
-        Ok(r) => r,
-        Err(e) => return TestResult::error(rev_dep, e)
-    };
-
-    if next_result.failed() {
-        TestResult::regressed(rev_dep, base_result, next_result)
-    } else {
-        TestResult::passed(rev_dep, base_result, next_result)
-    }
-}
+// Legacy run_test_local() removed - now always use run_multi_version_test()
 
 /// Run multi-version ICT tests for a dependent crate (Phase 5)
 ///
@@ -1718,7 +1764,8 @@ fn report_quick_result(current_num: usize, total: usize, result: &TestResult) {
         println!("");
 
         // Print detailed error output immediately for failures
-        if matches!(result.data, TestResultData::Regressed(_) | TestResultData::Broken(_) | TestResultData::Error(_)) {
+        // TODO: Migrate to OfferedRow-based failure reporting
+        if matches!(result.data, TestResultData::Error(_)) {
             report::print_immediate_failure(result);
         }
     });
@@ -1760,7 +1807,7 @@ fn report_results(res: Result<Vec<TestResult>, Error>, args: &cli::CliArgs, conf
                     }
                 }
                 Err(e) => {
-                    report_error(e);
+                    eprintln!("Error generating HTML report: {}", e);
                 }
             }
         }
