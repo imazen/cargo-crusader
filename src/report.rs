@@ -253,64 +253,9 @@ pub fn format_separator_row(
     previous_columns: &[SeparatorColumn],
     next_columns: &[SeparatorColumn],
 ) -> String {
-    use std::collections::BTreeSet;
-
-    let mut result = String::new();
-
-    // Collect all divider positions from both rows
-    let mut prev_dividers = BTreeSet::new();
-    let mut next_dividers = BTreeSet::new();
-
-    let mut offset = 0;
-    for col in previous_columns {
-        if col.divide {
-            prev_dividers.insert(offset + col.width);
-        }
-        offset += col.width + if col.divide { 1 } else { 0 };
-    }
-
-    offset = 0;
-    for col in next_columns {
-        if col.divide {
-            next_dividers.insert(offset + col.width);
-        }
-        offset += col.width + if col.divide { 1 } else { 0 };
-    }
-
-    // Total width is the maximum of both row widths
-    let total_width = offset.max(
-        previous_columns.iter().map(|c| c.width + if c.divide { 1 } else { 0 }).sum()
-    );
-
-    // Determine left border character based on whether there are dividers
-    let has_prev_dividers = !prev_dividers.is_empty();
-    let has_next_dividers = !next_dividers.is_empty();
-
-    let left_char = match (has_prev_dividers, has_next_dividers) {
-        (true, true) => '├',   // Both have dividers
-        (true, false) => '└',  // Only previous
-        (false, true) => '┌',  // Only next
-        (false, false) => '│', // Neither
-    };
-    result.push(left_char);
-
-    // Generate the separator line character by character
-    for pos in 0..total_width {
-        let in_prev = prev_dividers.contains(&pos);
-        let in_next = next_dividers.contains(&pos);
-
-        let ch = match (in_prev, in_next) {
-            (true, true) => '┼',   // Both rows have divider here
-            (true, false) => '┴',  // Only previous row has divider
-            (false, true) => '┬',  // Only next row has divider
-            (false, false) => ' ', // Neither - rowspan, use space
-        };
-        result.push(ch);
-    }
-
-    result.push('│'); // Right border
-    result.push('\n');
-    result
+    // This needs a proper implementation that handles all 11 box-drawing characters
+    // For now, return a placeholder that indicates this needs work
+    todo!("format_separator_row needs complete rewrite to handle corners properly. See test for expected behavior.")
 }
 
 /// Print an OfferedRow using the standard table format
@@ -931,6 +876,49 @@ fn format_offered_row_string(row: &OfferedRow, is_last_in_group: bool) -> String
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_separator_row_generation() {
+        let w = &*WIDTHS;
+
+        // Test 1: Normal row to normal row (standard separator)
+        let normal_cols = vec![
+            SeparatorColumn { width: 25, divide: true },
+            SeparatorColumn { width: 12, divide: true },
+            SeparatorColumn { width: 18, divide: true },
+            SeparatorColumn { width: 36, divide: true },
+            SeparatorColumn { width: 25, divide: false },
+        ];
+        let result = format_separator_row(&normal_cols, &normal_cols);
+        assert_eq!(result.chars().next().unwrap(), '├', "Normal to normal should start with ├");
+        assert!(result.contains('┼'), "Normal to normal should have ┼ for continuing dividers");
+
+        // Test 2: Normal row to error column (entering error box)
+        let error_cols = vec![
+            SeparatorColumn { width: 4, divide: true },
+            SeparatorColumn { width: 112, divide: false },
+        ];
+        let result = format_separator_row(&normal_cols, &error_cols);
+        eprintln!("Normal to error result: {}", result);
+        eprintln!("Characters: {:?}", result.chars().collect::<Vec<_>>());
+        // After the shortened offered column, we should have a corner
+        assert!(result.contains('┌'), "Should have ┌ when entering error box:\n{}", result);
+        assert!(result.contains('┴'), "Should have ┴ where prev dividers end:\n{}", result);
+        assert!(result.contains('┘'), "Should have ┘ at corners:\n{}", result);
+
+        // Test 3: Error column to normal row (exiting error box)
+        let result = format_separator_row(&error_cols, &normal_cols);
+        assert!(result.contains('└'), "Should have └ when exiting error box");
+        assert!(result.contains('┬'), "Should have ┬ where next dividers start");
+
+        // Test 4: Verify spaces for rowspan (no divider at position)
+        assert!(result.contains(' '), "Should have spaces for rowspan");
+    }
 }
 
 /// Compatibility wrapper for old API
