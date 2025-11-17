@@ -275,28 +275,46 @@ pub fn print_offered_row(row: &OfferedRow, is_last_in_group: bool) {
 
     // Print error details with dropped-panel border (if any)
     if !error_details.is_empty() {
-        let error_text_width = w.total - 1 - w.offered - 1 - 1 - 1 - 1;
         let corner1_width = w.spec;
         let corner2_width = w.dependent;
         let padding_width = w.spec + w.resolved + w.dependent  - corner1_width - corner2_width;
 
-        println!("│{:w_offered$}├{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│",
-                 "", "", "", "", "",
-                 w_offered = w.offered, corner1 = corner1_width,
-                 padding = padding_width, corner2 = corner2_width, w_result = w.result);
+        let shortened_offered = 4;
+        let corner0_width = if shortened_offered != w.offered {
+            w.offered - shortened_offered -1
+        } else { 0};
+        let error_text_width = w.total - 1 - shortened_offered - 1 - 1 - 1 - 1;
 
+        if corner0_width > 0 {
+            println!("│{:shortened_offered$}┌{:─<corner0$}┴{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│",
+                     "", "", "", "", "",
+                     shortened_offered = shortened_offered, corner0 = corner0_width, corner1 = corner1_width,
+                     padding = padding_width, corner2 = corner2_width, w_result = w.result);
+        } else {
+            println!("│{:w_offered$}├{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│",
+                    "", "", "", "", "",
+                    w_offered = w.offered, corner1 = corner1_width,
+                    padding = padding_width, corner2 = corner2_width, w_result = w.result);
+        }
         for error_line in &error_details {
             let truncated = truncate_with_padding(error_line, error_text_width);
-            println!("│{:w_offered$}│ {} │",
+            println!("│{:shortened_offered$}│ {} │",
                      "", truncated,
-                     w_offered = w.offered);
+                     shortened_offered = shortened_offered);
         }
 
         if !is_last_in_group {
-            println!("│{:w_offered$}├{:─<w_spec$}┬{:─<w_resolved$}┬{:─<w_dependent$}┬{:─<w_result$}┤",
-                     "", "", "", "", "",
-                     w_offered = w.offered, w_spec = w.spec, w_resolved = w.resolved,
-                     w_dependent = w.dependent, w_result = w.result);
+            if corner0_width > 0 {
+                println!("│{:shortened_offered$}└{:─<corner0$}┬{:─<corner1$}┬{:─<corner2$}┬{:─<corner3$}┬{:─<corner4$}┤",
+                         "", "", "", "", "",
+                         shortened_offered = shortened_offered, corner0 = corner0_width, corner1 = w.spec, corner2 = w.resolved,
+                         corner3 = w.dependent, corner4 = w.result);
+            } else {
+                println!("│{:w_offered$}├{:─<w_spec$}┬{:─<w_resolved$}┬{:─<w_dependent$}┬{:─<w_result$}┤",
+                        "", "", "", "", "",
+                        w_offered = w.offered, w_spec = w.spec, w_resolved = w.resolved,
+                        w_dependent = w.dependent, w_result = w.result);
+            }
         }
     }
 
