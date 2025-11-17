@@ -21,12 +21,12 @@ fn test_wip_breaking_change_regression() {
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_path = manifest_dir.join("test-crates/fixtures/rust-rgb-breaking");
-    let binary_path = manifest_dir.join("target/release/cargo-crusader");
+    let binary_path = manifest_dir.join("target/release/cargo-copter");
 
     assert!(fixture_path.exists(), "Fixture path should exist: {:?}", fixture_path);
     assert!(binary_path.exists(), "Binary should be built: {:?}", binary_path);
 
-    // Run cargo-crusader with multi-version testing
+    // Run cargo-copter with multi-version testing
     let output = Command::new(&binary_path)
         .arg("--path")
         .arg(&fixture_path)
@@ -35,7 +35,7 @@ fn test_wip_breaking_change_regression() {
         .arg("--test-versions")
         .arg("0.8.52")
         .output()
-        .expect("Failed to execute cargo-crusader");
+        .expect("Failed to execute cargo-copter");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

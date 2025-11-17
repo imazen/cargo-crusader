@@ -34,7 +34,7 @@ use crates_io_api::SyncClient;
 use lazy_static::lazy_static;
 use log::debug;
 
-const USER_AGENT: &str = "cargo-crusader/0.1.1 (https://github.com/brson/cargo-crusader)";
+const USER_AGENT: &str = "cargo-copter/0.1.1 (https://github.com/imazen/cargo-copter)";
 
 lazy_static! {
     static ref CRATES_IO_CLIENT: SyncClient = {
@@ -165,7 +165,7 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     // Initialize failure log
     let log_path = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join("crusader-failures.log");
+        .join("copter-failures.log");
     compile::init_failure_log(log_path.clone());
     debug!("Failure log initialized at: {:?}", log_path);
 
@@ -433,7 +433,7 @@ fn run(args: cli::CliArgs, config: Config) -> Result<Vec<TestResult>, Error> {
     report::print_summary(&summary);
 
     // Generate markdown report
-    let markdown_path = PathBuf::from("crusader-report.md");
+    let markdown_path = PathBuf::from("copter-report.md");
     match report::export_markdown_table_report(&all_rows, &markdown_path, &config.crate_name, &config.display_version(), total) {
         Ok(_) => {
             println!("Markdown report: {}", markdown_path.display());
@@ -509,7 +509,7 @@ fn is_git_dirty() -> bool {
 }
 
 fn get_config(args: &cli::CliArgs) -> Result<Config, Error> {
-    let limit = env::var("CRUSADER_LIMIT")
+    let limit = env::var("COPTER_LIMIT")
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
 
@@ -568,7 +568,7 @@ fn get_config(args: &cli::CliArgs) -> Result<Config, Error> {
                 path.clone()
             }
         } else {
-            let env_manifest = env::var("CRUSADER_MANIFEST");
+            let env_manifest = env::var("COPTER_MANIFEST");
             PathBuf::from(env_manifest.unwrap_or_else(|_| "./Cargo.toml".to_string()))
         };
         debug!("Using manifest {:?}", manifest);
@@ -1862,7 +1862,7 @@ fn compile_with_custom_dep(
 struct CrateHandle(PathBuf);
 
 fn get_crate_handle(rev_dep: &RevDep) -> Result<CrateHandle, Error> {
-    let cache_path = Path::new("./.crusader/crate-cache");
+    let cache_path = Path::new("./.copter/crate-cache");
     let ref crate_dir = cache_path.join(&rev_dep.name);
     (fs::create_dir_all(crate_dir)?);
     let crate_file = crate_dir.join(format!("{}-{}.crate", rev_dep.name, rev_dep.vers));
@@ -1975,7 +1975,7 @@ fn status_lock<F>(f: F) where F: FnOnce() -> () {
 }
 
 fn print_status_header() {
-    print!("crusader: ");
+    print!("copter: ");
 }
 
 fn print_color(s: &str, fg: term::color::Color) {

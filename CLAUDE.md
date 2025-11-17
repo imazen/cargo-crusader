@@ -4,7 +4,7 @@ AI assistant guidance for working with this codebase.
 
 ## Project
 
-Cargo Crusader tests downstream impact of Rust crate changes by building reverse dependencies against both published and work-in-progress versions.
+Cargo Copter tests downstream impact of Rust crate changes by building reverse dependencies against both published and work-in-progress versions.
 
 **⚠️ SECURITY**: Executes arbitrary code from crates.io. Use sandboxed environments.
 
@@ -13,8 +13,8 @@ Cargo Crusader tests downstream impact of Rust crate changes by building reverse
 ```bash
 cargo build --release
 cargo test
-./target/release/cargo-crusader --path ~/rust-rgb --top-dependents 1
-./target/release/cargo-crusader --crate rgb --test-versions "0.8.50 0.8.51"
+./target/release/cargo-copter --path ~/rust-rgb --top-dependents 1
+./target/release/cargo-copter --crate rgb --test-versions "0.8.50 0.8.51"
 ```
 
 ## Key Files
@@ -80,8 +80,8 @@ See **[CONSOLE-FORMAT.md](CONSOLE-FORMAT.md)** for complete specification with 9
 
 ## Caching
 
-- `.crusader/staging/{crate}-{version}/` - Unpacked sources + build artifacts
-- `.crusader/crate-cache/` - Downloaded .crate files
+- `.copter/staging/{crate}-{version}/` - Unpacked sources + build artifacts
+- `.copter/crate-cache/` - Downloaded .crate files
 - Provides **10x speedup** on reruns
 
 ## CLI Flags (Updated)
@@ -96,9 +96,9 @@ See **[CONSOLE-FORMAT.md](CONSOLE-FORMAT.md)** for complete specification with 9
 
 **Examples**:
 ```bash
-cargo-crusader --test-versions "0.8.0 0.8.48" 0.8.91
-cargo-crusader --crate rgb --test-versions 0.8.50 --force-versions
-cargo-crusader --features "serde unstable" --jobs 4
+cargo-copter --test-versions "0.8.0 0.8.48" 0.8.91
+cargo-copter --crate rgb --test-versions 0.8.50 --force-versions
+cargo-copter --features "serde unstable" --jobs 4
 ```
 
 ## Common Workflows
@@ -106,17 +106,17 @@ cargo-crusader --features "serde unstable" --jobs 4
 ### Test local WIP against top dependents
 ```bash
 cd ~/my-crate
-cargo-crusader --top-dependents 10 --jobs 4
+cargo-copter --top-dependents 10 --jobs 4
 ```
 
 ### Test multiple versions of published crate
 ```bash
-cargo-crusader --crate rgb --test-versions "0.8.48 0.8.50 0.8.51"
+cargo-copter --crate rgb --test-versions "0.8.48 0.8.50 0.8.51"
 ```
 
 ### Force test incompatible version
 ```bash
-cargo-crusader --test-versions 0.7.0 --force-versions
+cargo-copter --test-versions 0.7.0 --force-versions
 ```
 
 ## Next Steps

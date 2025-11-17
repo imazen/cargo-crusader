@@ -481,7 +481,7 @@ fn emit_cargo_override_path(source_dir: &Path, override_path: &Path) -> Result<(
 
     let config_content = format!(
         r#"[patch.crates-io]
-# This is a temporary override for cargo-crusader testing
+# This is a temporary override for cargo-copter testing
 # Any crate at this path will override the published version
 paths = ["{}"]
 "#,

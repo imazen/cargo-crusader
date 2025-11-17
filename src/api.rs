@@ -9,7 +9,7 @@ use std::io::Read;
 use std::time::Duration;
 use log::debug;
 
-const USER_AGENT: &str = "cargo-crusader/0.1.1 (https://github.com/brson/cargo-crusader)";
+const USER_AGENT: &str = "cargo-copter/0.1.1 (https://github.com/imazen/cargo-copter)";
 
 lazy_static::lazy_static! {
     static ref CRATES_IO_CLIENT: SyncClient = {

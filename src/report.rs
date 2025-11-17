@@ -657,7 +657,7 @@ pub fn generate_html_report(rows: &[OfferedRow], crate_name: &str, display_versi
 
     writeln!(file, "<!DOCTYPE html>")?;
     writeln!(file, "<html><head><meta charset='UTF-8'>")?;
-    writeln!(file, "<title>Cargo Crusader Report - {}</title>", crate_name)?;
+    writeln!(file, "<title>Cargo Copter Report - {}</title>", crate_name)?;
     writeln!(file, "<style>")?;
     writeln!(file, "body {{ font-family: monospace; margin: 20px; }}")?;
     writeln!(file, "table {{ border-collapse: collapse; width: 100%; }}")?;
@@ -666,7 +666,7 @@ pub fn generate_html_report(rows: &[OfferedRow], crate_name: &str, display_versi
     writeln!(file, ".regressed {{ color: red; }}")?;
     writeln!(file, ".broken {{ color: orange; }}")?;
     writeln!(file, "</style></head><body>")?;
-    writeln!(file, "<h1>Cargo Crusader Report</h1>")?;
+    writeln!(file, "<h1>Cargo Copter Report</h1>")?;
     writeln!(file, "<p>Crate: <strong>{}</strong> ({})</p>", crate_name, display_version)?;
     writeln!(file, "<table><thead><tr>")?;
     writeln!(file, "<th>Offered</th><th>Spec</th><th>Resolved</th><th>Dependent</th><th>Result</th>")?;
@@ -705,7 +705,7 @@ pub fn generate_html_report(rows: &[OfferedRow], crate_name: &str, display_versi
 pub fn generate_markdown_report(rows: &[OfferedRow], crate_name: &str, display_version: &str, output_path: &PathBuf) -> std::io::Result<()> {
     let mut file = File::create(output_path)?;
 
-    writeln!(file, "# Cargo Crusader Report\n")?;
+    writeln!(file, "# Cargo Copter Report\n")?;
     writeln!(file, "**Crate**: {} ({})\n", crate_name, display_version)?;
     writeln!(file, "## Test Results\n")?;
     writeln!(file, "| Offered | Spec | Resolved | Dependent | Result |")?;
@@ -762,7 +762,7 @@ pub fn export_markdown_table_report(rows: &[OfferedRow], output_path: &PathBuf, 
     let summary = summarize_offered_rows(rows);
 
     // Write markdown header
-    writeln!(file, "# Cargo Crusader Test Report\n")?;
+    writeln!(file, "# Cargo Copter Test Report\n")?;
     writeln!(file, "**Crate**: {} ({})", crate_name, display_version)?;
     writeln!(file, "**Dependents Tested**: {}\n", total_deps)?;
 

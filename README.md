@@ -1,8 +1,8 @@
-# Cargo Crusader
+# Cargo Copter
 
 > Test the downstream impact of crate changes before publishing to crates.io
 
-**Join the Cargo Crusade** and practice [responsible API evolution](https://github.com/rust-lang/rfcs/blob/master/text/1105-api-evolution.md).
+Test your crate changes with **Cargo Copter** and practice [responsible API evolution](https://github.com/rust-lang/rfcs/blob/master/text/1105-api-evolution.md).
 
 ## ⚠️ Security Warning
 
@@ -14,14 +14,14 @@
 
 ```bash
 # Install
-git clone https://github.com/brson/cargo-crusader
-cd cargo-crusader
+git clone https://github.com/imazen/cargo-copter
+cd cargo-copter
 cargo build --release
 export PATH=$PATH:$(pwd)/target/release/
 
 # Run
 cd /path/to/your/crate
-cargo-crusader
+cargo-copter
 ```
 
 **Output:**
@@ -46,8 +46,8 @@ Summary:
   ✗ Regressed: 0
   ⊘ Skipped:   0
 
-HTML report: crusader-report.html
-Markdown report: crusader-report.md
+HTML report: copter-report.html
+Markdown report: copter-report.md
 ```
 
 ---
@@ -56,31 +56,31 @@ Markdown report: crusader-report.md
 
 ```bash
 # Test top 10 dependents
-cargo-crusader --top-dependents 10
+cargo-copter --top-dependents 10
 
 # Test specific crates (supports version pinning)
-cargo-crusader --dependents image:0.25.8 serde tokio
+cargo-copter --dependents image:0.25.8 serde tokio
 
 # Parallel testing with a custom caching dir (10x faster)
-cargo-crusader --jobs 4 --staging-dir .crusader/staging
+cargo-copter --jobs 4 --staging-dir .copter/staging
 
 # Fast check-only (skip tests)
-cargo-crusader --no-test --jobs 8
+cargo-copter --no-test --jobs 8
 
 # Test against multiple crate versions
-cargo-crusader --test-versions "0.8.0 0.8.48" 0.8.91
+cargo-copter --test-versions "0.8.0 0.8.48" 0.8.91
 
 # Force version testing (bypass semver)
-cargo-crusader --test-versions 0.9.0--force-versions 0.7.1
+cargo-copter --test-versions 0.9.0--force-versions 0.7.1
 
 # Test with specific features enabled
-cargo-crusader --features "serde unstable"
+cargo-copter --features "serde unstable"
 
 # Test different crate path
-cargo-crusader --path ~/my-crate
+cargo-copter --path ~/my-crate
 
 # Test published crate without local source
-cargo-crusader --crate rgb --test-versions 0.8.50 0.8.51
+cargo-copter --crate rgb --test-versions 0.8.50 0.8.51
 ```
 
 ---
@@ -95,8 +95,8 @@ cargo-crusader --crate rgb --test-versions 0.8.50 0.8.51
 --dependents <CRATE[:VER]>...   Test specific crates (supports version pins)
 --dependent-paths <PATH>...     Test local crates
 -j, --jobs <N>                  Parallel jobs [default: 1]
---staging-dir <PATH>            Cache directory [default: .crusader/staging]
---output <PATH>                 HTML output [default: crusader-report.html]
+--staging-dir <PATH>            Cache directory [default: .copter/staging]
+--output <PATH>                 HTML output [default: copter-report.html]
 --no-check                      Skip cargo check
 --no-test                       Skip cargo test
 --json                          JSON output
@@ -112,14 +112,14 @@ cargo-crusader --crate rgb --test-versions 0.8.50 0.8.51
 ### Version Syntax
 ```bash
 # Pin specific versions
-cargo-crusader --dependents image:0.25.8 serde:1.0.0
+cargo-copter --dependents image:0.25.8 serde:1.0.0
 
 # Test multiple versions (space-delimited within args or across args)
-cargo-crusader --test-versions "0.8.0 0.8.48" 0.8.91
+cargo-copter --test-versions "0.8.0 0.8.48" 0.8.91
 
 
 # Pass feature flags to cargo
-cargo-crusader --features "default serde" --features rgb/unstable
+cargo-copter --features "default serde" --features rgb/unstable
 ```
 
 ---
@@ -224,9 +224,9 @@ See [CONSOLE-FORMAT.md](CONSOLE-FORMAT.md) for complete format specification and
 5. **Reporting** - Generate console, HTML, and markdown reports
 
 ### Caching Strategy
-- **Source cache**: `.crusader/staging/{crate}-{version}/` (unpacked sources)
+- **Source cache**: `.copter/staging/{crate}-{version}/` (unpacked sources)
 - **Build artifacts**: Same location, includes `target/` directory
-- **Downloads**: `.crusader/crate-cache/` (original .crate files)
+- **Downloads**: `.copter/crate-cache/` (original .crate files)
 
 ### Override Mechanism
 **Current**: Uses `.cargo/config` with `paths = [...]`
@@ -261,7 +261,7 @@ All contributions welcome! Priority areas:
 
 **Docker Example**:
 ```bash
-docker run --rm -v $(pwd):/work crusader/cargo-crusader \
+docker run --rm -v $(pwd):/work imazen/cargo-copter \
   --path /work --top-dependents 5
 ```
 
@@ -276,7 +276,7 @@ docker run --rm -v $(pwd):/work crusader/cargo-crusader \
 → Use `--top-dependents N`, `--dependents`, or `--dependent-paths`
 
 **Disk space exhausted**
-→ Clear cache: `rm -rf .crusader/`
+→ Clear cache: `rm -rf .copter/`
 
 **Compilation timeout**
 → Use `--no-test` for faster check-only runs
@@ -299,7 +299,7 @@ cargo build --release
 cargo test
 
 # Test against real crate
-RUST_LOG=debug ./target/release/cargo-crusader --path ~/rust-rgb --top-dependents 1
+RUST_LOG=debug ./target/release/cargo-copter --path ~/rust-rgb --top-dependents 1
 ```
 
 **Project Structure**:
@@ -332,12 +332,12 @@ test-crates/integration-fixtures/  # Test fixtures
 ## CI/CD Integration
 
 ```yaml
-# .github/workflows/crusader.yml
+# .github/workflows/copter.yml
 name: Test Downstream Impact
 on: [pull_request]
 
 jobs:
-  crusader:
+  copter:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -345,21 +345,21 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install cargo-crusader
+      - name: Install cargo-copter
         run: |
-          git clone https://github.com/brson/cargo-crusader
-          cd cargo-crusader
+          git clone https://github.com/imazen/cargo-copter
+          cd cargo-copter
           cargo install --path .
 
       - name: Test top 10 dependents
-        run: cargo-crusader --top-dependents 10 --jobs 4
+        run: cargo-copter --top-dependents 10 --jobs 4
 
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v3
         with:
-          name: crusader-report
-          path: crusader-report.html
+          name: copter-report
+          path: copter-report.html
 ```
 
 ---
@@ -388,17 +388,17 @@ Recently updated from 7-year-old dependencies:
 
 MIT/Apache-2.0
 
-This is the official license of The Rust Project and The Cargo Crusade.
+This is the standard license for Rust projects.
 
 ---
 
 ## Links
 
-- **GitHub**: https://github.com/brson/cargo-crusader
+- **GitHub**: https://github.com/imazen/cargo-copter
 - **crates.io**: https://crates.io
 - **Rust API Evolution RFC**: https://github.com/rust-lang/rfcs/blob/master/text/1105-api-evolution.md
 - **Development Roadmap**: [PLAN.md](PLAN.md)
 
 ---
 
-**Ready to crusade?** Run `cargo-crusader` in your crate and ensure your changes don't break the ecosystem! 🛡️
+**Ready to take flight?** Run `cargo-copter` in your crate and ensure your changes don't break the ecosystem! 🚁

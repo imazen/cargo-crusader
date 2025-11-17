@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "cargo-crusader")]
+#[command(name = "cargo-copter")]
 #[command(about = "Test the downstream impact of crate changes before publishing")]
 #[command(version)]
 pub struct CliArgs {
@@ -40,11 +40,11 @@ pub struct CliArgs {
     pub jobs: usize,
 
     /// HTML report output path
-    #[arg(long, default_value = "crusader-report.html")]
+    #[arg(long, default_value = "copter-report.html")]
     pub output: PathBuf,
 
     /// Directory for staging unpacked crates (enables caching across runs)
-    #[arg(long, default_value = ".crusader/staging")]
+    #[arg(long, default_value = ".copter/staging")]
     pub staging_dir: PathBuf,
 
     /// Skip cargo check (only run tests)
@@ -145,7 +145,7 @@ mod tests {
             force_versions: vec![],
             jobs: 1,
             output: PathBuf::from("report.html"),
-            staging_dir: PathBuf::from(".crusader/staging"),
+            staging_dir: PathBuf::from(".copter/staging"),
             no_check: true,
             no_test: true,
             json: false,
@@ -165,7 +165,7 @@ mod tests {
             force_versions: vec![],
             jobs: 0,
             output: PathBuf::from("report.html"),
-            staging_dir: PathBuf::from(".crusader/staging"),
+            staging_dir: PathBuf::from(".copter/staging"),
             no_check: false,
             no_test: false,
             json: false,
@@ -188,7 +188,7 @@ mod tests {
             force_versions: vec![],
             jobs: 1,
             output: PathBuf::from("report.html"),
-            staging_dir: PathBuf::from(".crusader/staging"),
+            staging_dir: PathBuf::from(".copter/staging"),
             no_check: false,
             no_test: false,
             json: false,
@@ -210,7 +210,7 @@ mod tests {
             force_versions: vec![],
             jobs: 1,
             output: PathBuf::from("report.html"),
-            staging_dir: PathBuf::from(".crusader/staging"),
+            staging_dir: PathBuf::from(".copter/staging"),
             no_check: false,
             no_test: false,
             json: false,
@@ -230,7 +230,7 @@ mod tests {
             force_versions: vec![],
             jobs: 1,
             output: PathBuf::from("report.html"),
-            staging_dir: PathBuf::from(".crusader/staging"),
+            staging_dir: PathBuf::from(".copter/staging"),
             no_check: false,
             no_test: false,
             json: false,

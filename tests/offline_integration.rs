@@ -1,4 +1,4 @@
-/// Offline integration tests for cargo-crusader
+/// Offline integration tests for cargo-copter
 ///
 /// These tests use local test fixtures to verify all result states
 /// without requiring network access to crates.io

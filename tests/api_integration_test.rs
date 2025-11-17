@@ -10,7 +10,7 @@ fn test_rgb_reverse_dependencies_with_limit() {
 
     // Create API client with proper User-Agent and rate limiting
     let client = SyncClient::new(
-        "cargo-crusader-test/0.1.1 (test suite)",
+        "cargo-copter-test/0.1.1 (test suite)",
         Duration::from_millis(1000)
     ).expect("Failed to create API client");
 
@@ -32,7 +32,7 @@ fn test_rgb_pagination() {
     use crates_io_api::SyncClient;
 
     let client = SyncClient::new(
-        "cargo-crusader-test/0.1.1 (test suite)",
+        "cargo-copter-test/0.1.1 (test suite)",
         Duration::from_millis(1000)
     ).expect("Failed to create API client");
 
@@ -55,7 +55,7 @@ fn test_rgb_contains_known_dependents() {
     use crates_io_api::SyncClient;
 
     let client = SyncClient::new(
-        "cargo-crusader-test/0.1.1 (test suite)",
+        "cargo-copter-test/0.1.1 (test suite)",
         Duration::from_millis(1000)
     ).expect("Failed to create API client");
 
@@ -84,7 +84,7 @@ fn test_rgb_version_resolution() {
     use crates_io_api::SyncClient;
 
     let client = SyncClient::new(
-        "cargo-crusader-test/0.1.1 (test suite)",
+        "cargo-copter-test/0.1.1 (test suite)",
         Duration::from_millis(1000)
     ).expect("Failed to create API client");
 
@@ -111,7 +111,7 @@ fn test_limit_parameter_enforced() {
     use crates_io_api::SyncClient;
 
     let client = SyncClient::new(
-        "cargo-crusader-test/0.1.1 (test suite)",
+        "cargo-copter-test/0.1.1 (test suite)",
         Duration::from_millis(1000)
     ).expect("Failed to create API client");
 
@@ -137,7 +137,7 @@ fn test_api_endpoint_structure() {
     use crates_io_api::SyncClient;
 
     let client = SyncClient::new(
-        "cargo-crusader-test/0.1.1 (test suite)",
+        "cargo-copter-test/0.1.1 (test suite)",
         Duration::from_millis(1000)
     ).expect("Failed to create API client");
 

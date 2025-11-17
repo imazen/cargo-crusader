@@ -1,6 +1,6 @@
 /// Integration test for default baseline + WIP testing (without --test-versions)
 ///
-/// This test validates the output when running cargo-crusader with just --path,
+/// This test validates the output when running cargo-copter with just --path,
 /// which implicitly tests:
 /// 1. Baseline (published version from crates.io)
 /// 2. WIP (local work-in-progress version)
@@ -13,7 +13,7 @@ use std::process::Command;
 #[test]
 #[ignore] // Requires network access to download load_image
 fn test_default_baseline_wip_output() {
-    // Run cargo-crusader in default mode (no --test-versions)
+    // Run cargo-copter in default mode (no --test-versions)
     // This should test:
     // - Baseline: Published version from crates.io
     // - WIP: Local version from --path
@@ -25,7 +25,7 @@ fn test_default_baseline_wip_output() {
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_path = manifest_dir.join("test-crates/fixtures/rust-rgb-breaking");
-    let binary_path = manifest_dir.join("target/release/cargo-crusader");
+    let binary_path = manifest_dir.join("target/release/cargo-copter");
 
     assert!(fixture_path.exists(), "Fixture path should exist: {:?}", fixture_path);
     assert!(binary_path.exists(), "Binary should be built: {:?}", binary_path);
@@ -37,7 +37,7 @@ fn test_default_baseline_wip_output() {
         .arg("--dependents")
         .arg("load_image:3.3.1")
         .output()
-        .expect("Failed to execute cargo-crusader");
+        .expect("Failed to execute cargo-copter");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
