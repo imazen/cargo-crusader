@@ -242,22 +242,6 @@ pub fn print_table_footer() {
     print!("{}", format_table_footer());
 }
 
-/// Column descriptor for separator generation
-#[derive(Debug, Clone, Copy)]
-pub struct SeparatorColumn {
-    pub width: usize,
-    pub divide: bool,  // Does this column have a right border?
-}
-
-pub fn format_separator_row(
-    previous_columns: &[SeparatorColumn],
-    next_columns: &[SeparatorColumn],
-) -> String {
-    // This needs a proper implementation that handles all 11 box-drawing characters
-    // For now, return a placeholder that indicates this needs work
-    todo!("format_separator_row needs complete rewrite to handle corners properly. See test for expected behavior.")
-}
-
 /// Print an OfferedRow using the standard table format
 pub fn print_offered_row(row: &OfferedRow, is_last_in_group: bool) {
     // Convert OfferedRow to column strings
@@ -291,29 +275,27 @@ pub fn print_offered_row(row: &OfferedRow, is_last_in_group: bool) {
 
     // Print error details with dropped-panel border (if any)
     if !error_details.is_empty() {
+        let corner1_width = w.spec;
+        let corner2_width = w.dependent;
+        let padding_width = w.spec + w.resolved + w.dependent  - corner1_width - corner2_width;
+
         let shortened_offered = 4;
+        let corner0_width = if shortened_offered != w.offered {
+            w.offered - shortened_offered -1
+        } else { 0};
         let error_text_width = w.total - 1 - shortened_offered - 1 - 1 - 1 - 1;
 
-        // Define column layouts
-        // Normal row: 5 columns (offered | spec | resolved | dependent | result)
-        let normal_columns = vec![
-            SeparatorColumn { width: w.offered, divide: true },
-            SeparatorColumn { width: w.spec, divide: true },
-            SeparatorColumn { width: w.resolved, divide: true },
-            SeparatorColumn { width: w.dependent, divide: true },
-            SeparatorColumn { width: w.result, divide: false },
-        ];
-
-        // Error column: shortened offered + wide error column
-        let error_columns = vec![
-            SeparatorColumn { width: shortened_offered, divide: true },
-            SeparatorColumn { width: error_text_width, divide: false },
-        ];
-
-        // Print separator from normal row to error column
-        print!("{}", format_separator_row(&normal_columns, &error_columns));
-
-        // Print error lines
+        if corner0_width > 0 {
+            println!("│{:shortened_offered$}┌{:─<corner0$}┴{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│",
+                     "", "", "", "", "",
+                     shortened_offered = shortened_offered, corner0 = corner0_width, corner1 = corner1_width,
+                     padding = padding_width, corner2 = corner2_width, w_result = w.result);
+        } else {
+            println!("│{:w_offered$}├{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│",
+                    "", "", "", "", "",
+                    w_offered = w.offered, corner1 = corner1_width,
+                    padding = padding_width, corner2 = corner2_width, w_result = w.result);
+        }
         for error_line in &error_details {
             let truncated = truncate_with_padding(error_line, error_text_width);
             println!("│{:shortened_offered$}│ {} │",
@@ -321,9 +303,18 @@ pub fn print_offered_row(row: &OfferedRow, is_last_in_group: bool) {
                      shortened_offered = shortened_offered);
         }
 
-        // Print separator from error column back to normal (if not last)
         if !is_last_in_group {
-            print!("{}", format_separator_row(&error_columns, &normal_columns));
+            if corner0_width > 0 {
+                println!("│{:shortened_offered$}└{:─<corner0$}┬{:─<corner1$}┬{:─<corner2$}┬{:─<corner3$}┬{:─<corner4$}┤",
+                         "", "", "", "", "",
+                         shortened_offered = shortened_offered, corner0 = corner0_width, corner1 = w.spec, corner2 = w.resolved,
+                         corner3 = w.dependent, corner4 = w.result);
+            } else {
+                println!("│{:w_offered$}├{:─<w_spec$}┬{:─<w_resolved$}┬{:─<w_dependent$}┬{:─<w_result$}┤",
+                        "", "", "", "", "",
+                        w_offered = w.offered, w_spec = w.spec, w_resolved = w.resolved,
+                        w_dependent = w.dependent, w_result = w.result);
+            }
         }
     }
 
@@ -827,35 +818,26 @@ fn format_offered_row_string(row: &OfferedRow, is_last_in_group: bool) -> String
 
     // Error details (if any)
     if !error_details.is_empty() {
-        let shortened_offered = 4;
-        let error_text_width = w.total - 1 - shortened_offered - 1 - 1 - 1 - 1;
+        let error_text_width = w.total - 1 - w.offered - 1 - 1 - 1 - 1;
+        let corner1_width = w.spec;
+        let corner2_width = w.dependent;
+        let padding_width = w.spec + w.resolved + w.dependent - corner1_width - corner2_width;
 
-        // Define column layouts
-        let normal_columns = vec![
-            SeparatorColumn { width: w.offered, divide: true },
-            SeparatorColumn { width: w.spec, divide: true },
-            SeparatorColumn { width: w.resolved, divide: true },
-            SeparatorColumn { width: w.dependent, divide: true },
-            SeparatorColumn { width: w.result, divide: false },
-        ];
+        output.push_str(&format!("│{:w_offered$}├{:─<corner1$}┘{:padding$}└{:─<corner2$}┘{:w_result$}│\n",
+            "", "", "", "", "",
+            w_offered = w.offered, corner1 = corner1_width,
+            padding = padding_width, corner2 = corner2_width, w_result = w.result));
 
-        let error_columns = vec![
-            SeparatorColumn { width: shortened_offered, divide: true },
-            SeparatorColumn { width: error_text_width, divide: false },
-        ];
-
-        // Add separator from normal row to error column
-        output.push_str(&format_separator_row(&normal_columns, &error_columns));
-
-        // Add error lines
         for error_line in &error_details {
             let truncated = truncate_with_padding(error_line, error_text_width);
-            output.push_str(&format!("│{:shortened_offered$}│ {} │\n", "", truncated, shortened_offered = shortened_offered));
+            output.push_str(&format!("│{:w_offered$}│ {} │\n", "", truncated, w_offered = w.offered));
         }
 
-        // Add separator from error column back to normal (if not last)
         if !is_last_in_group {
-            output.push_str(&format_separator_row(&error_columns, &normal_columns));
+            output.push_str(&format!("│{:w_offered$}├{:─<w_spec$}┬{:─<w_resolved$}┬{:─<w_dependent$}┬{:─<w_result$}┤\n",
+                "", "", "", "", "",
+                w_offered = w.offered, w_spec = w.spec, w_resolved = w.resolved,
+                w_dependent = w.dependent, w_result = w.result));
         }
     }
 
@@ -876,49 +858,6 @@ fn format_offered_row_string(row: &OfferedRow, is_last_in_group: bool) -> String
     }
 
     output
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_separator_row_generation() {
-        let w = &*WIDTHS;
-
-        // Test 1: Normal row to normal row (standard separator)
-        let normal_cols = vec![
-            SeparatorColumn { width: 25, divide: true },
-            SeparatorColumn { width: 12, divide: true },
-            SeparatorColumn { width: 18, divide: true },
-            SeparatorColumn { width: 36, divide: true },
-            SeparatorColumn { width: 25, divide: false },
-        ];
-        let result = format_separator_row(&normal_cols, &normal_cols);
-        assert_eq!(result.chars().next().unwrap(), '├', "Normal to normal should start with ├");
-        assert!(result.contains('┼'), "Normal to normal should have ┼ for continuing dividers");
-
-        // Test 2: Normal row to error column (entering error box)
-        let error_cols = vec![
-            SeparatorColumn { width: 4, divide: true },
-            SeparatorColumn { width: 112, divide: false },
-        ];
-        let result = format_separator_row(&normal_cols, &error_cols);
-        eprintln!("Normal to error result: {}", result);
-        eprintln!("Characters: {:?}", result.chars().collect::<Vec<_>>());
-        // After the shortened offered column, we should have a corner
-        assert!(result.contains('┌'), "Should have ┌ when entering error box:\n{}", result);
-        assert!(result.contains('┴'), "Should have ┴ where prev dividers end:\n{}", result);
-        assert!(result.contains('┘'), "Should have ┘ at corners:\n{}", result);
-
-        // Test 3: Error column to normal row (exiting error box)
-        let result = format_separator_row(&error_cols, &normal_cols);
-        assert!(result.contains('└'), "Should have └ when exiting error box");
-        assert!(result.contains('┬'), "Should have ┬ where next dividers start");
-
-        // Test 4: Verify spaces for rowspan (no divider at position)
-        assert!(result.contains(' '), "Should have spaces for rowspan");
-    }
 }
 
 /// Compatibility wrapper for old API

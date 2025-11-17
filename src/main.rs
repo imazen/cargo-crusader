@@ -11,6 +11,7 @@
 mod api;
 mod cli;
 mod compile;
+mod console_tables;
 mod error_extract;
 mod report;
 
