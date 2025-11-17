@@ -256,7 +256,6 @@ pub fn format_separator_row(
     use std::collections::BTreeSet;
 
     let mut result = String::new();
-    result.push('│'); // Left border
 
     // Collect all divider positions from both rows
     let mut prev_dividers = BTreeSet::new();
@@ -283,6 +282,18 @@ pub fn format_separator_row(
         previous_columns.iter().map(|c| c.width + if c.divide { 1 } else { 0 }).sum()
     );
 
+    // Determine left border character based on whether there are dividers
+    let has_prev_dividers = !prev_dividers.is_empty();
+    let has_next_dividers = !next_dividers.is_empty();
+
+    let left_char = match (has_prev_dividers, has_next_dividers) {
+        (true, true) => '├',   // Both have dividers
+        (true, false) => '└',  // Only previous
+        (false, true) => '┌',  // Only next
+        (false, false) => '│', // Neither
+    };
+    result.push(left_char);
+
     // Generate the separator line character by character
     for pos in 0..total_width {
         let in_prev = prev_dividers.contains(&pos);
@@ -290,9 +301,9 @@ pub fn format_separator_row(
 
         let ch = match (in_prev, in_next) {
             (true, true) => '┼',   // Both rows have divider here
-            (true, false) => '┴',  // Only previous row
-            (false, true) => '┬',  // Only next row
-            (false, false) => '─', // Neither (horizontal line)
+            (true, false) => '┴',  // Only previous row has divider
+            (false, true) => '┬',  // Only next row has divider
+            (false, false) => ' ', // Neither - rowspan, use space
         };
         result.push(ch);
     }
